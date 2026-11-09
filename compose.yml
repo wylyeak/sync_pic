@@ -2,7 +2,7 @@ name: picsync
 services:
   preflight:
     build: {context: ., target: controller}
-    image: picsync-controller:local
+    image: ${PICSYNC_CONTROLLER_IMAGE:-picsync-controller:local}
     user: "${PICSYNC_UID:-1000}:${PICSYNC_GID:-1000}"
     environment: &media_environment
       PICSYNC_SOURCE: /photos/${PICSYNC_SOURCE_SUBDIR:-source}
@@ -22,7 +22,7 @@ services:
 
   controller:
     build: {context: ., target: controller}
-    image: picsync-controller:local
+    image: ${PICSYNC_CONTROLLER_IMAGE:-picsync-controller:local}
     restart: unless-stopped
     network_mode: host
     user: "${PICSYNC_UID:-1000}:${PICSYNC_GID:-1000}"
@@ -61,7 +61,7 @@ services:
 
   dashboard:
     build: {context: ., target: dashboard}
-    image: picsync-dashboard:local
+    image: ${PICSYNC_DASHBOARD_IMAGE:-picsync-dashboard:local}
     restart: unless-stopped
     network_mode: host
     user: "${PICSYNC_UID:-1000}:${PICSYNC_GID:-1000}"
@@ -168,7 +168,7 @@ services:
   adb:
     profiles: [usb]
     build: {context: ., target: controller}
-    image: picsync-controller:local
+    image: ${PICSYNC_CONTROLLER_IMAGE:-picsync-controller:local}
     restart: unless-stopped
     network_mode: host
     user: "0:0"

@@ -59,6 +59,7 @@ docker compose up -d --build controller dashboard syncthing
 
 - [完整部署、两种数据库方式、ADB 和配对步骤](docs/deployment.md)
 - [全部环境变量与 TOML 参数说明](docs/configuration.md)
+- [Push 自动构建与 Docker Hub 发布](docs/docker-hub.md)
 - [备份、释放空间和删除的证据边界](docs/workflow.md)
 
 ## 安全边界

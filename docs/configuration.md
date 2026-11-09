@@ -36,6 +36,8 @@
 
 | 参数 | 默认 | 含义 |
 | --- | --- | --- |
+| PICSYNC_CONTROLLER_IMAGE | picsync-controller:local | 可填 Docker Hub 预构建镜像；同时用于 preflight 和可选容器 ADB。 |
+| PICSYNC_DASHBOARD_IMAGE | picsync-dashboard:local | 可填 Docker Hub 看板镜像，不填则沿用本地构建。 |
 | PICSYNC_BARK_KEY | 空 | 私有推送密钥，还需在控制器 TOML 启用 Bark。 |
 | PICSYNC_PIXEL_URL | 空 | 手机控制入口；为空隐藏，只允许 HTTP(S) 绝对 URL。 |
 | PICSYNC_SYNCTHING_URL | 空 | Syncthing 入口；为空隐藏，不得含凭据。 |

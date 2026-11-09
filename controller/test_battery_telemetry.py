@@ -26,3 +26,30 @@ class BatteryTelemetryTests(unittest.TestCase):
         ctrl.phone_call.assert_called_once_with('battery')
         self.assertGreater(ctrl.publish.call_args.kwargs['measured_at'], 0)
         self.assertEqual(ctrl.publish.call_args.kwargs['level'], 8)
+
+    def test_mapping_boundary_and_charging(self):
+        for level, allowed in [(0, False), (9, False), (10, True), (100, True)]:
+            with self.subTest(level=level):
+                ctrl = self.controller()
+                ctrl.phone_call.return_value['level'] = level
+                self.assertEqual(ctrl.mapping_allowed(), allowed)
+
+    def test_mapping_unknown_blocks_and_recovers(self):
+        ctrl = self.controller()
+        ctrl.phone_call.side_effect = RuntimeError('offline')
+        self.assertFalse(ctrl.mapping_allowed())
+        ctrl.next_battery_check = 0
+        ctrl.phone_call.side_effect = None
+        ctrl.phone_call.return_value['level'] = 10
+        self.assertTrue(ctrl.mapping_allowed())
+
+    def test_low_battery_preserves_mapping_candidates(self):
+        ctrl = self.controller()
+        ctrl.round = {'candidates': [{'source_path': 'photo.jpg'}], 'members': {}}
+        ctrl.stop = Mock()
+        ctrl.stop.is_set.return_value = False
+        ctrl.save = Mock()
+        self.assertFalse(ctrl.map_round())
+        self.assertEqual(ctrl.round['candidates'], [{'source_path': 'photo.jpg'}])
+        self.assertEqual(ctrl.round['members'], {})
+        ctrl.save.assert_called_once_with()

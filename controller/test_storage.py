@@ -145,6 +145,7 @@ class InventoryTest(unittest.TestCase):
         from file_sync import Controller, Observation
         from configuration import load
         value = Controller.__new__(Controller)
+        value.mapping_allowed = Mock(return_value=True)
         value.c = load()
         value.c['bark']['enabled'] = False
         value.source, value.target = self.source, self.target

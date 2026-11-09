@@ -69,6 +69,7 @@ class ControllerTests(unittest.TestCase):
         from unittest.mock import Mock
         from file_sync import Controller
         value = Controller.__new__(Controller)
+        value.mapping_allowed = Mock(return_value=True)
         value.c = load()
         value.events = __import__('queue').SimpleQueue()
         value.source, value.target = '/source', '/target'

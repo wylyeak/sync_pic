@@ -92,6 +92,7 @@ services:
       options: {max-size: 10m, max-file: "3"}
 
   syncthing:
+    cpus: ${SYNCTHING_CPUS:-1.0}
     image: ${SYNCTHING_IMAGE:-syncthing/syncthing:latest}
     restart: unless-stopped
     network_mode: host
@@ -103,6 +104,8 @@ services:
       TZ: ${TZ:-Asia/Shanghai}
       STGUIADDRESS: 127.0.0.1:8384
       STNODEFAULTFOLDER: "true"
+      GOMAXPROCS: ${SYNCTHING_GOMAXPROCS:-1}
+      GOMEMLIMIT: ${SYNCTHING_GOMEMLIMIT:-512MiB}
     volumes:
       - ./state/syncthing:/var/syncthing
       # This is the ONLY photo path visible to Syncthing. Never mount source/parent.

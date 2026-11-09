@@ -108,3 +108,9 @@ ADB 固定本机 5037，看板固定本机 8027，Syncthing GUI 固定本机 838
 state/mysql、state/syncthing、state/adb-auth、state/pixel、state/logs、state/status 分别保存数据库、同步状态、授权、网页状态、日志和遥测数据。这些内容均应保持私有，不提交到 Git。更改 UID/GID 后核查已有数据权限。
 
 源码/systemd 模式另外设置 PICSYNC_SOURCE、PICSYNC_TARGET、PICSYNC_MEDIA_MOUNT，以及本机 PICSYNC_CONFIG、PICSYNC_TELEMETRY、PICSYNC_ADB_PATH、PICSYNC_SYNCTHING_CONFIG；日志路径也需可写。Compose 已自动设置这些变量，不需额外写入 .env。
+
+### 低电量与 Syncthing 资源预算
+
+新增硬链接仅在有效手机电量至少 10% 时执行；低于 10%（包括充电时）或电量不可读时暂停，达到 10% 自动继续。电量每 60 秒读取一次，映射循环逐文件检查缓存，保留冻结候选和已处理进度。已有文件传输及清理仍使用各自原有判定条件。
+
+Compose 默认限制 Syncthing 为 1 CPU，`GOMAXPROCS=1`，`GOMEMLIMIT=512MiB`（Go 内存软目标，不是容器硬上限）。可用 `SYNCTHING_CPUS`、`SYNCTHING_GOMAXPROCS`、`SYNCTHING_GOMEMLIMIT` 调整。预算较低时传输和扫描可能变慢。参考 https://docs.syncthing.net/users/tuning.html 。

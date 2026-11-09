@@ -203,15 +203,18 @@ class Controller:
             raise PhoneUnavailable('手机连接或相册界面异常：' + type(exc).__name__) from None
 
     def refresh_battery(self):
-        # Display-only observation: never affects backup or deletion decisions.
+        # Battery gates new links only; cleanup retains its independent evidence gates.
         if time.monotonic() < getattr(self, 'next_battery_check', 0):
             return
         self.next_battery_check = time.monotonic() + 60
         try:
             with self.device():
                 state = self.phone_call('battery')
+            level = state.get('level')
+            self.mapping_battery = level if type(level) is int and 0 <= level <= 100 else None
             self.publish('battery', **state, state='ok', error=None, measured_at=time.time())
         except Exception as exc:
+            self.mapping_battery = None
             self.publish('battery', state='error', error=type(exc).__name__)
 
     def photos_status(self, status):
@@ -404,10 +407,21 @@ class Controller:
             raise
         return True
 
+    def mapping_allowed(self):
+        self.refresh_battery()
+        level = getattr(self, 'mapping_battery', None)
+        allowed = level is not None and level >= 10
+        self.publish('mapping', paused=not allowed, battery_level=level,
+                     reason=None if allowed else ('battery_unknown' if level is None else 'low_battery'))
+        return allowed
+
     def map_round(self):
         for row in self.round['candidates']:
             if self.stop.is_set():
                 raise Stopped()
+            if not self.mapping_allowed():
+                self.save()
+                return False
             relative = row['source_path']
             source, target = file_path(self.source, relative), file_path(self.target, relative)
             try:
@@ -437,6 +451,7 @@ class Controller:
         self.save('sync' if self.round['members'] else 'complete')
         if not self.round['members']:
             self.flush_batch_reports()
+        return True
 
     def tick(self):
         ensure_storage(self.source)
@@ -448,12 +463,13 @@ class Controller:
         with TargetDirectory(self.source, self.target):
             pass
         if not self.round or self.round['phase'] == 'complete':
+            if not self.mapping_allowed():
+                return min(60, self.c['monitor']['interval'])
             if not self.new_round():
                 return self.c['monitor']['idle_interval']
         phase = self.round['phase']
         if phase == 'mapping':
-            self.map_round()
-            return 1
+            return 1 if self.map_round() else min(60, self.c['monitor']['interval'])
         if phase == 'sync' or (phase == 'backup' and not before['ready']):
             # Photos uploads received files while Syncthing is still delivering
             # the batch. This is telemetry only: never confirm the whole batch

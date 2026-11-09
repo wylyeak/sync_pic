@@ -1,5 +1,9 @@
 # PicSync
 
+[![CI 与镜像发布](https://github.com/wylyeak/sync_pic/actions/workflows/tests.yml/badge.svg?branch=main)](https://github.com/wylyeak/sync_pic/actions/workflows/tests.yml)
+[![Controller 镜像版本](https://img.shields.io/docker/v/wangyulie/sync-pic-controller/latest?label=controller&logo=docker)](https://hub.docker.com/r/wangyulie/sync-pic-controller/tags)
+[![Dashboard 镜像版本](https://img.shields.io/docker/v/wangyulie/sync-pic-dashboard/latest?label=dashboard&logo=docker)](https://hub.docker.com/r/wangyulie/sync-pic-dashboard/tags)
+
 PicSync 在同一文件系统内为源照片创建硬链接，放入专用目标目录，再通过 Syncthing 同步到 Android 手机。Google 相册完成备份后，PicSync 释放手机空间，并追踪目标目录中的同步删除。只读看板展示批次、文件、异常、手机电量和备份进度。
 
 仓库提供可移植的应用源码和部署模板，不含实际照片、数据库、运行配置、设备编号、密钥或历史报告。克隆仓库不会修改现有部署。

@@ -74,18 +74,8 @@ error_interval = 3600
 
 成功一次或服务重启都会清零连续失败计数；主循环与源扫描分别统计。未达通知门槛的短暂异常也不会触发恢复通知。同一批次、同一类通知仍受重复通知间隔限制。
 
-## 开发者：源码与测试
+## 开发文档
 
-普通部署无需执行本节。需要修改源码或自行发布镜像时，再参考 [镜像构建与发布](docs/docker-hub.md)。
-
-```sh
-python3 -m venv .venv
-. .venv/bin/activate
-pip install -r requirements.txt
-sh scripts/test.sh
-docker compose --env-file .env.example config --quiet
-```
-
-默认测试不读取 `.env`，不访问真实手机、照片或生产数据库。MySQL 集成测试需显式设置 `FILE_SYNC_TEST_MYSQL=1` 并提供隔离测试服务器，测试会创建并删除随机测试数据库，不能指向无备份的生产数据库。
-
-`scripts/check-portability.py` 检查 Git 跟踪文件中的运行数据、私钥和明显本机地址。提交前仍应检查 `git diff --cached`。本仓库不包含第三方 APK、ADB、scrcpy 二进制或上游服务源码；这些组件按各自许可单独获取。
+- [开发、源码部署与验证](docs/development.md)：开发环境、默认测试、隔离 MySQL 测试、本地镜像部署和验收流程。
+- [镜像构建与发布](docs/docker-hub.md)：维护者的 GitHub Actions 与 Docker Hub 配置。
+- [已有验证范围](docs/validation.md)：历史验证记录及其适用边界。

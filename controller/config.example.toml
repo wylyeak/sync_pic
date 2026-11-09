@@ -1,0 +1,44 @@
+# Source and target safety roots come from PICSYNC_SOURCE/PICSYNC_TARGET.
+# Explicit [directories] overrides must exactly match those safety roots.
+[scan]
+interval = 3600
+progress_every = 100
+[mapping]
+max_bytes = 16106127360
+order = "mtime_asc"
+[monitor]
+interval = 60
+idle_interval = 300
+[observation]
+confirmations = 3
+interval = 300
+[syncthing]
+config = "state/syncthing/config/config.xml"
+folder = "photos"
+device = ""
+timeout = 10
+[pixel]
+container = "pixel-web"
+adb_backend = "host"
+adb_path = "adb"
+serial = ""
+adb_timeout = 40
+[mysql]
+host = "127.0.0.1"
+port = 3306
+user = "picsync"
+database = "picsync"
+password = ""
+[bark]
+enabled = false
+key = ""
+timeout = 15
+retries = 2
+blocked_after = 1200
+error_interval = 3600
+error_threshold = 2
+[logging]
+path = "/state/logs/controller.log"
+level = "INFO"
+max_bytes = 10485760
+backups = 5

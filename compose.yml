@@ -1,0 +1,184 @@
+name: picsync
+services:
+  preflight:
+    build: {context: ., target: controller}
+    image: picsync-controller:local
+    user: "${PICSYNC_UID:-1000}:${PICSYNC_GID:-1000}"
+    environment: &media_environment
+      PICSYNC_SOURCE: /photos/${PICSYNC_SOURCE_SUBDIR:-source}
+      PICSYNC_TARGET: /photos/${PICSYNC_TARGET_SUBDIR:-target}
+      PICSYNC_MEDIA_MOUNT: /photos
+      PICSYNC_MEDIA_FS: ${PICSYNC_MEDIA_FS:-}
+    volumes:
+      - type: bind
+        source: ${PICSYNC_PHOTO_ROOT:?Set PICSYNC_PHOTO_ROOT to the common media mount}
+        target: /photos
+        read_only: true
+        bind: {create_host_path: false}
+    command: [python, scripts/preflight.py]
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+
+  controller:
+    build: {context: ., target: controller}
+    image: picsync-controller:local
+    restart: unless-stopped
+    network_mode: host
+    user: "${PICSYNC_UID:-1000}:${PICSYNC_GID:-1000}"
+    depends_on:
+      preflight: {condition: service_completed_successfully}
+    environment:
+      <<: *media_environment
+      TZ: ${TZ:-Asia/Shanghai}
+      PICSYNC_CONFIG: /app/config.toml
+      PICSYNC_TELEMETRY: /state/status/runtime.json
+      PICSYNC_ADB_PATH: /app/deploy/adb/adb-client.sh
+      PICSYNC_SERIAL: ${PICSYNC_SERIAL:-}
+      PICSYNC_SYNCTHING_CONFIG: /etc/syncthing/config.xml
+      PICSYNC_SYNCTHING_DEVICE: ${PICSYNC_SYNCTHING_DEVICE:-}
+      PICSYNC_MYSQL_HOST: ${PICSYNC_MYSQL_HOST:-127.0.0.1}
+      PICSYNC_MYSQL_PORT: ${PICSYNC_MYSQL_PORT:-3306}
+      PICSYNC_MYSQL_USER: ${PICSYNC_MYSQL_USER:-picsync}
+      PICSYNC_MYSQL_PASSWORD: ${PICSYNC_MYSQL_PASSWORD:-}
+      PICSYNC_MYSQL_DATABASE: ${PICSYNC_MYSQL_DATABASE:-picsync}
+      PICSYNC_BARK_KEY: ${PICSYNC_BARK_KEY:-}
+    volumes:
+      - type: bind
+        source: ${PICSYNC_PHOTO_ROOT:?Set PICSYNC_PHOTO_ROOT}
+        target: /photos
+        bind: {create_host_path: false}
+      - ./controller/config.toml:/app/config.toml:ro
+      - ./state:/state
+      # Mount the config directory, not a single config file that may not exist yet.
+      - ./state/syncthing/config:/etc/syncthing:ro
+    read_only: true
+    tmpfs: ["/tmp:size=64m,mode=1777"]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    logging:
+      options: {max-size: 10m, max-file: "3"}
+
+  dashboard:
+    build: {context: ., target: dashboard}
+    image: picsync-dashboard:local
+    restart: unless-stopped
+    network_mode: host
+    user: "${PICSYNC_UID:-1000}:${PICSYNC_GID:-1000}"
+    environment:
+      TZ: ${TZ:-Asia/Shanghai}
+      PICSYNC_MYSQL_HOST: ${PICSYNC_MYSQL_HOST:-127.0.0.1}
+      PICSYNC_MYSQL_PORT: ${PICSYNC_MYSQL_PORT:-3306}
+      PICSYNC_MYSQL_USER: ${PICSYNC_DASHBOARD_MYSQL_USER:-picsync_reader}
+      PICSYNC_MYSQL_PASSWORD: ${PICSYNC_DASHBOARD_MYSQL_PASSWORD:-}
+      PICSYNC_MYSQL_DATABASE: ${PICSYNC_MYSQL_DATABASE:-picsync}
+      PICSYNC_PIXEL_URL: ${PICSYNC_PIXEL_URL:-}
+      PICSYNC_SYNCTHING_URL: ${PICSYNC_SYNCTHING_URL:-}
+    volumes:
+      - ./dashboard/config.toml:/app/config.toml:ro
+      - ./state/status:/data/status:ro
+    read_only: true
+    tmpfs:
+      - /tmp:size=32m,mode=1777
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8027/health',timeout=5)"]
+      interval: 60s
+      timeout: 10s
+      start_period: 60s
+      retries: 3
+    logging:
+      options: {max-size: 10m, max-file: "3"}
+
+  syncthing:
+    image: ${SYNCTHING_IMAGE:-syncthing/syncthing:latest}
+    restart: unless-stopped
+    network_mode: host
+    depends_on:
+      preflight: {condition: service_completed_successfully}
+    environment:
+      PUID: ${PICSYNC_UID:-1000}
+      PGID: ${PICSYNC_GID:-1000}
+      TZ: ${TZ:-Asia/Shanghai}
+      STGUIADDRESS: 127.0.0.1:8384
+      STNODEFAULTFOLDER: "true"
+    volumes:
+      - ./state/syncthing:/var/syncthing
+      # This is the ONLY photo path visible to Syncthing. Never mount source/parent.
+      - type: bind
+        source: ${PICSYNC_PHOTO_ROOT:?Set PICSYNC_PHOTO_ROOT}/${PICSYNC_TARGET_SUBDIR:-target}
+        target: /sync/photos
+        bind: {create_host_path: false}
+
+  pixel:
+    profiles: [phone]
+    image: ${PIXEL_IMAGE:-ghcr.io/bilbospocketses/ws-scrcpy-web:stable}
+    restart: unless-stopped
+    network_mode: host
+    user: "${PICSYNC_UID:-1000}:${PICSYNC_GID:-1000}"
+    environment:
+      TZ: ${TZ:-Asia/Shanghai}
+      WS_SCRCPY_WEB_PORT: ${PIXEL_WEB_PORT:-8001}
+      ADB_REAL_BINARY: /opt/pixel/adb-client
+      NODE_OPTIONS: --require=/opt/pixel/host-adb-web.cjs --require=/opt/pixel/fix-stream.cjs
+    volumes:
+      - ./state/pixel:/data
+      - ./deploy/adb/adb-client.sh:/data/dependencies/adb/adb:ro
+      # Bootstrap this binary before enabling the phone profile; see docs/deployment.md.
+      - type: bind
+        source: ./state/adb-client
+        target: /opt/pixel/adb-client
+        read_only: true
+        bind: {create_host_path: false}
+      - ./deploy/pixel/host-adb-web.cjs:/opt/pixel/host-adb-web.cjs:ro
+      - ./deploy/pixel/fix-stream.cjs:/opt/pixel/fix-stream.cjs:ro
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    healthcheck:
+      test: [CMD, node, -e, "fetch('http://127.0.0.1:'+(process.env.WS_SCRCPY_WEB_PORT||8001)+'/').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 60s
+      timeout: 15s
+      start_period: 180s
+      retries: 3
+
+  mysql:
+    profiles: [database]
+    image: mysql:8.4
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-}
+      MYSQL_DATABASE: ${PICSYNC_MYSQL_DATABASE:-picsync}
+      MYSQL_USER: ${PICSYNC_MYSQL_USER:-picsync}
+      MYSQL_PASSWORD: ${PICSYNC_MYSQL_PASSWORD:-}
+      PICSYNC_DASHBOARD_MYSQL_USER: ${PICSYNC_DASHBOARD_MYSQL_USER:-picsync_reader}
+      PICSYNC_DASHBOARD_MYSQL_PASSWORD: ${PICSYNC_DASHBOARD_MYSQL_PASSWORD:-}
+    ports:
+      - "127.0.0.1:${PICSYNC_MYSQL_PORT:-3306}:3306"
+    volumes:
+      - ./state/mysql:/var/lib/mysql
+      - ./deploy/mysql-init.sh:/docker-entrypoint-initdb.d/20-picsync-reader.sh:ro
+    healthcheck:
+      test: [CMD-SHELL, 'MYSQL_PWD="$${MYSQL_ROOT_PASSWORD}" mysqladmin ping -uroot --silent']
+      interval: 15s
+      timeout: 5s
+      start_period: 60s
+      retries: 5
+
+  adb:
+    profiles: [usb]
+    build: {context: ., target: controller}
+    image: picsync-controller:local
+    restart: unless-stopped
+    network_mode: host
+    user: "0:0"
+    environment:
+      HOME: /root
+    command: [/usr/bin/adb, -L, "tcp:5037", nodaemon, server]
+    volumes:
+      - /dev/bus/usb:/dev/bus/usb
+      - ./state/adb-auth:/root/.android
+    device_cgroup_rules: ["c 189:* rw"]
+    cap_drop: [ALL]
+    cap_add: [DAC_OVERRIDE]
+    security_opt: [no-new-privileges:true]

@@ -1,0 +1,12 @@
+[mysql]
+host = "127.0.0.1"
+port = 3306
+user = "picsync_reader"
+password = ""
+database = "picsync"
+[dashboard]
+telemetry = "/data/status/runtime.json"
+refresh_seconds = 10
+[links]
+pixel_url = ""
+syncthing_url = ""

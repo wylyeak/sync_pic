@@ -1,0 +1,9 @@
+.git
+.env*
+**/config.toml
+state
+**/__pycache__
+.venv
+.deps
+backups
+reports

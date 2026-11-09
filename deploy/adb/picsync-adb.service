@@ -1,0 +1,13 @@
+[Unit]
+Description=Shared system ADB for PicSync
+After=default.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/adb -L tcp:5037 nodaemon server
+Restart=always
+RestartSec=3
+UMask=0077
+
+[Install]
+WantedBy=default.target

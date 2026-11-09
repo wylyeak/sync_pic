@@ -216,6 +216,26 @@ class Controller:
         except Exception as exc:
             self.mapping_battery = None
             self.publish('battery', state='error', error=type(exc).__name__)
+        try:
+            self.battery_notice()
+        except Exception:
+            log.warning('Battery notification failed; retry next battery check')
+
+    def battery_notice(self):
+        level = getattr(self, 'mapping_battery', None)
+        threshold = self.c['mapping']['min_battery_percent']
+        if level is None:
+            return
+        if level < threshold:
+            self.battery_notice_active = True
+            self.notify('mapping-low-battery',
+                        f'手机电量低：{level}%，低于阈值 {threshold}%。新增硬链接已暂停；'
+                        f'电量达到 {threshold}% 后自动继续（充电时同样适用）。')
+        elif getattr(self, 'battery_notice_active', True):
+            # Persist deduplication across restarts; re-arm only on a valid recovery.
+            self.db.execute('DELETE FROM controller_notifications WHERE event_key=%s',
+                            ('mapping-low-battery',))
+            self.battery_notice_active = False
 
     def photos_status(self, status):
         self.publish('photos', **status)
@@ -410,8 +430,9 @@ class Controller:
     def mapping_allowed(self):
         self.refresh_battery()
         level = getattr(self, 'mapping_battery', None)
-        allowed = level is not None and level >= 10
+        allowed = level is not None and level >= self.c['mapping']['min_battery_percent']
         self.publish('mapping', paused=not allowed, battery_level=level,
+                     min_battery_percent=self.c['mapping']['min_battery_percent'],
                      reason=None if allowed else ('battery_unknown' if level is None else 'low_battery'))
         return allowed
 

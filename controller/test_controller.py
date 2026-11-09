@@ -11,6 +11,13 @@ class ConfigTests(unittest.TestCase):
             path = Path(folder, 'config.toml')
             path.write_text(text)
             return load(path)
+    def test_battery_threshold_configuration(self):
+        self.assertEqual(self.config('')['mapping']['min_battery_percent'], 10)
+        self.assertEqual(self.config('[mapping]\nmin_battery_percent=20')['mapping']['min_battery_percent'], 20)
+        for value in ('0', '-1', '101', 'true', '10.5'):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                self.config('[mapping]\nmin_battery_percent=' + value)
+
     def test_defaults(self):
         self.assertEqual(self.config('')['mapping']['max_bytes'], 15 * 1024**3)
         self.assertEqual(self.config('')['bark']['error_threshold'], 2)

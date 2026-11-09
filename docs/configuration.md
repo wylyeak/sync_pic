@@ -114,3 +114,12 @@ state/mysql、state/syncthing、state/adb-auth、state/pixel、state/logs、stat
 新增硬链接仅在有效手机电量至少 10% 时执行；低于 10%（包括充电时）或电量不可读时暂停，达到 10% 自动继续。电量每 60 秒读取一次，映射循环逐文件检查缓存，保留冻结候选和已处理进度。已有文件传输及清理仍使用各自原有判定条件。
 
 Compose 默认限制 Syncthing 为 1 CPU，`GOMAXPROCS=1`，`GOMEMLIMIT=512MiB`（Go 内存软目标，不是容器硬上限）。可用 `SYNCTHING_CPUS`、`SYNCTHING_GOMAXPROCS`、`SYNCTHING_GOMEMLIMIT` 调整。预算较低时传输和扫描可能变慢。参考 https://docs.syncthing.net/users/tuning.html 。
+
+低电量阈值现可在控制器 TOML 中设置，重启控制器生效：
+
+```toml
+[mapping]
+min_battery_percent = 10 # 整数 1–100；低于此值暂停，达到此值恢复
+```
+
+沿用 `[bark]` 的启用状态、密钥、超时与重试配置。每次低电量周期发送一次通知（即使当前不在映射阶段），通知记录保存到数据库，重启不会重复推送；有效电量恢复至阈值后重新允许下一次低电量通知。推送失败不标记成功，下次电量检查继续尝试；电量未知不会误报低电量或清除去重记录。通知失败不解除硬链接暂停。

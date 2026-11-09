@@ -6,17 +6,26 @@
 
 PicSync 在同一文件系统内为源照片创建硬链接，放入专用目标目录，再通过 Syncthing 同步到 Android 手机。Google 相册完成备份后，PicSync 释放手机空间，并追踪目标目录中的同步删除。只读看板展示批次、文件、异常、手机电量和备份进度。
 
-仓库提供可移植的应用源码和部署模板，不含实际照片、数据库、运行配置、设备编号、密钥或历史报告。克隆仓库不会修改现有部署。
+## 开始使用
 
-## 组成
+准备一台 Linux 主机、一部可使用 Google 相册备份的 Android 手机，以及同一文件系统上的源照片目录和专用同步目录。PicSync 提供 Docker Hub 镜像，无需安装 Python、配置 GitHub Actions 或在本机编译。
 
-| 目录 | 内容 |
+| 服务 | 已发布镜像 |
 | --- | --- |
-| `controller/` | 扫描、路径唯一批次归属、备份确认、删除审计、Bark 防抖、状态采集 |
-| `phone/` | 通过 ADB 操作 Google 相册；默认预览，显式执行才释放空间 |
-| `dashboard/` | Flask 只读 API 与静态看板，使用单独的只读数据库账号 |
-| `deploy/` | 系统 ADB、Pixel 网页适配和数据库账号示例 |
-| `scripts/` | 启动、安装用户服务、测试和可移植性检查 |
+| 备份控制器、目录检查和可选 ADB | `wangyulie/sync-pic-controller` |
+| 只读看板 | `wangyulie/sync-pic-dashboard` |
+
+按 [用户部署教程](docs/deployment.md) 完成首次安装：
+
+1. 下载部署文件，准备私有配置。
+2. 填写照片路径、数据库密码和镜像地址，拉取镜像。
+3. 连接手机，配置 Syncthing 和 Google 相册。
+4. 通过只读检查，再用小批量照片验证备份流程。
+5. 启动控制器，打开看板查看进度。
+
+教程包含内置 MySQL、已有数据库、宿主机或容器 ADB，以及升级和回退方法。克隆仓库只是获取 Compose 和配套文件，不会启动服务或修改已有部署。
+
+## 备份过程
 
 ```mermaid
 flowchart LR
@@ -30,45 +39,21 @@ flowchart LR
     C -->|状态 JSON| W
 ```
 
-## Docker Compose 部署（推荐）
+## 部署前须知
 
-需要 Linux、Docker Compose v2，以及可使用 Google 相册备份的 Android 手机。源与目标必须位于同一媒体文件系统；`state/` 放在可靠的本机存储中。
+源和目标目录必须处于同一挂载，目标目录必须专用于 PicSync。Syncthing 只共享目标目录；源照片条目始终保留。
 
-```sh
-sh scripts/prepare.sh
-# 编辑 .env：媒体路径、文件系统类型、设备编号和数据库密码。
-# 配置文件中不包含真实部署值，首次启动前必须填写。
-docker compose config --quiet
-```
+控制器启动后会自动执行真实备份、Google 相册“释放空间”和目标清理。“释放空间”是手机上的全局操作，可能影响本批之外已经备份的内容，建议使用专用手机。首次使用请先完成教程中的配对检查和小批量验证。
 
-**外部 MySQL**：填写 `.env` 的连接地址、端口及两个独立账号，不启用 `database` profile。
+看板默认只在主机本地的 `http://127.0.0.1:8027/` 开放。远程访问方法见部署教程。
 
-**Compose 内置 MySQL**：填写两个账号密码和 `MYSQL_ROOT_PASSWORD`，执行：
-
-```sh
-docker compose --profile database up -d --build --wait mysql
-```
-
-接着按 [部署文档](docs/deployment.md) 启动 ADB、Syncthing 并完成手机配对。完成设备和目录配置后：
-
-```sh
-# 先做只读目录检查；成功后才会启动依赖它的服务。
-docker compose run --rm preflight
-docker compose up -d --build controller dashboard syncthing
-```
-
-默认复用宿主机 ADB。需要 ADB 也在 Compose 中运行时启用 `usb` profile；不得同时运行宿主机 ADB。可选手机控制网页使用 `phone` profile。
-
-看板仅监听 `http://127.0.0.1:8027/`，远程访问使用自己的受保护反向代理。控制器启动后会执行真实备份工作流，不是预览模式。旧控制器与这套 Compose 不能同时使用同一源目录和数据库。
-
-- [完整部署、两种数据库方式、ADB 和配对步骤](docs/deployment.md)
-- [全部环境变量与 TOML 参数说明](docs/configuration.md)
-- [Push 自动构建与 Docker Hub 发布](docs/docker-hub.md)
-- [备份、释放空间和删除的证据边界](docs/workflow.md)
+- [用户部署教程：安装、配对、启动、升级与回退](docs/deployment.md)
+- [配置参数参考](docs/configuration.md)
+- [工作流与限制](docs/workflow.md)
 
 ## 安全边界
 
-- 从不删除源照片条目。删除动作只经过 `TargetDirectory.unlink()`，且仅针对目标目录中的普通文件。
+- 从不删除源照片条目。删除操作仅针对专用目标目录中的普通文件。
 - 运行时根目录通过 `PICSYNC_SOURCE`、`PICSYNC_TARGET` 固定；TOML 和清理命令不得覆盖它们。拒绝重叠、符号链接、路径穿越、根目录替换和挂载别名。
 - 源和目标必须处于同一挂载。不要分别 bind mount 两个目录；硬链接可能失败，安全检查也会拒绝这种布局。
 - 删除目标硬链接后源条目仍保留，不表示实际释放了同等磁盘空间。
@@ -89,7 +74,9 @@ error_interval = 3600
 
 成功一次或服务重启都会清零连续失败计数；主循环与源扫描分别统计。未达通知门槛的短暂异常也不会触发恢复通知。同一批次、同一类通知仍受重复通知间隔限制。
 
-## 本地开发与测试
+## 开发者：源码与测试
+
+普通部署无需执行本节。需要修改源码或自行发布镜像时，再参考 [镜像构建与发布](docs/docker-hub.md)。
 
 ```sh
 python3 -m venv .venv

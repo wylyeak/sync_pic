@@ -1,6 +1,6 @@
 # 配置参数参考
 
-.env.example 是部署示例，两个 config.example.toml 是应用示例。真实 .env、config.toml 和 state/ 被 Git 忽略。Compose 显式设置的环境变量优先于 TOML，修改后需重新创建服务。
+.env.example 是部署示例，两个 config.example.toml 是应用示例。实际使用的 .env、config.toml 和 state/ 均由 Git 忽略。Compose 显式设置的环境变量优先于 TOML，修改后需重新创建服务。
 
 ## 媒体和设备环境变量
 
@@ -30,7 +30,7 @@
 | PICSYNC_DASHBOARD_MYSQL_PASSWORD | 空 | 必填：看板只读账号密码。 |
 | MYSQL_ROOT_PASSWORD | 空 | 仅内置库必填：初始化管理员密码，不传给应用。 |
 
-内置库仅第一次初始化时创建库和账号。改 .env 不会修改已有账号。名称只允许字母、数字和下划线，最长 64 字符。
+内置 MySQL 仅在首次初始化时创建数据库和账号。修改 .env 不会更改已有账号。名称只允许字母、数字和下划线，最长 64 字符。
 
 ## 可选功能环境变量
 
@@ -45,7 +45,7 @@
 | SYNCTHING_IMAGE | syncthing/syncthing:latest | 可改为自己验证过的固定版本或摘要。 |
 | PIXEL_IMAGE | ghcr.io/bilbospocketses/ws-scrcpy-web:stable | 可选网页镜像，更新后重测登录和投屏。 |
 
-ADB 固定本机 5037，看板固定本机 8027，Syncthing GUI 固定本机 8384。Syncthing 同步协议还使用自身默认传输端口，host 网络不会替你限制这些端口，应按网络策略配置防火墙。
+ADB 固定本机 5037，看板固定本机 8027，Syncthing GUI 固定本机 8384。Syncthing 同步协议还使用自身默认传输端口，host 网络不会限制这些端口，应按网络策略配置防火墙。
 
 ## controller/config.toml
 
@@ -83,7 +83,7 @@ ADB 固定本机 5037，看板固定本机 8027，Syncthing GUI 固定本机 838
 | logging.max_bytes | 10485760 | 单个滚动日志最大字节数。 |
 | logging.backups | 5 | 滚动日志保留份数。 |
 
-可添加 directories.source/target，但它们必须与进程安全根完全一致，不能用于绕过保护。主控制器是自动执行工作流，不是预览模式。
+可添加 directories.source/target，但它们必须与进程安全根完全一致，不能用于绕过保护。主控制器会自动执行工作流，不提供预览模式。
 
 ## dashboard/config.toml
 
@@ -94,7 +94,7 @@ ADB 固定本机 5037，看板固定本机 8027，Syncthing GUI 固定本机 838
 | dashboard.refresh_seconds | 默认 10；目前是页面刷新提示值，实际前端轮询仍固定 10 秒，修改它不会改变采集频率。 |
 | links.pixel_url / links.syncthing_url | 可选入口，环境变量优先，不支持脚本 URL。 |
 
-电量跟随控制器轮询、至少 60 秒节流，空闲时可能 300 秒。读取失败或超过 10 分钟显示上次值；未知不显示为 0%。电量不参与清理判断。
+电量随控制器轮询采集，两次采集至少间隔 60 秒，空闲时可能间隔 300 秒。读取失败或数据超过 10 分钟未更新时，显示上次值；电量未知时不显示为 0%。电量不参与清理判断。
 
 ## Profile 和持久化
 
@@ -105,6 +105,6 @@ ADB 固定本机 5037，看板固定本机 8027，Syncthing GUI 固定本机 838
 | usb | 额外启用容器 ADB，不能与宿主机 ADB 并行。 |
 | phone | 额外启用手机控制网页，需先准备 state/adb-client。 |
 
-state/mysql、state/syncthing、state/adb-auth、state/pixel、state/logs、state/status 分别保存库、同步状态、授权、网页状态、日志、遥测。全部保持私有，不进 Git。更改 UID/GID 后核查已有数据权限。
+state/mysql、state/syncthing、state/adb-auth、state/pixel、state/logs、state/status 分别保存数据库、同步状态、授权、网页状态、日志和遥测数据。这些内容均应保持私有，不提交到 Git。更改 UID/GID 后核查已有数据权限。
 
 源码/systemd 模式另外设置 PICSYNC_SOURCE、PICSYNC_TARGET、PICSYNC_MEDIA_MOUNT，以及本机 PICSYNC_CONFIG、PICSYNC_TELEMETRY、PICSYNC_ADB_PATH、PICSYNC_SYNCTHING_CONFIG；日志路径也需可写。Compose 已自动设置这些变量，不需额外写入 .env。

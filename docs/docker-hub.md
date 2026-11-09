@@ -18,7 +18,7 @@
 | Variable，可选 | DOCKERHUB_NAMESPACE | 发布到的组织或命名空间，不填则使用登录用户名。 |
 | Variable，可选 | DOCKER_PLATFORMS | 默认 linux/amd64,linux/arm64；只需要本机架构可设 linux/amd64。 |
 
-用户名、组织及令牌不写入源码。组织发布时，登录账号需要拥有对应组织仓库的权限。缺少凭据会明确终止发布，不会悄悄跳过后宣称发布成功。
+用户名、组织及令牌不写入源码。组织发布时，登录账号需要拥有对应组织仓库的权限。缺少凭据时，工作流会报错并终止发布。
 
 ## 触发和标签
 
@@ -47,6 +47,6 @@ main 的发布串行执行，避免较旧的 main 构建覆盖更新的 latest�
 
 preflight 和可选容器 ADB 共用 controller 镜像。启用了 usb profile 时同时拉取和更新 adb；启用了 phone profile 时其镜像仍来自原上游。私有镜像需先在部署机器 docker login。
 
-发布只上传镜像到 Docker Hub，不通过工作流自动连接部署机器。目标机器仍使用自己的 .env、数据库和持久目录，不从 GitHub Actions 携带运行配置或照片。
+发布只上传镜像到 Docker Hub，不通过工作流自动连接部署机器。目标机器仍使用自己的 .env、数据库和持久目录，GitHub Actions 不传送运行配置或照片。
 
-凭据首次设置后，可以在 GitHub Actions 对失败的运行选择 Re-run failed jobs，或手动触发工作流。镜像仓库中出现相应标签并通过工作流末尾 manifest 校验，才表示实际发布完成。
+凭据首次设置后，可以在 GitHub Actions 对失败的运行选择 Re-run failed jobs，或手动触发工作流。镜像仓库中出现相应标签并通过工作流末尾 manifest 校验，才表示发布完成。

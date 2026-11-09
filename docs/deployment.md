@@ -1,6 +1,6 @@
 # Docker Compose 部署
 
-需要 Linux 和 Docker Compose v2。控制器、看板、目录检查和 Syncthing 均在 Compose 中；数据库、ADB、手机网页按需启用。不会自动迁移现有部署。
+需要 Linux 和 Docker Compose v2。控制器、看板、目录检查和 Syncthing 均在 Compose 中；数据库、ADB 和手机网页可按需启用。现有部署需要手动迁移。
 
 ## 1. 准备配置和存储
 
@@ -8,9 +8,9 @@
 
 该脚本只复制三个示例配置并创建 state 目录，不启动服务。编辑 .env；全部参数见 [配置参考](configuration.md)。
 
-PICSYNC_PHOTO_ROOT 是宿主机媒体共同父目录，例如 /srv/photos；其下 source、target 是已存在、互不重叠、位于同一文件系统的目录。target 必须专用于本项目。用 findmnt -T /srv/photos 核实挂载和文件系统类型，并填写 PICSYNC_MEDIA_FS；NAS 可能需要 nfs4，不能照抄 ext4。
+PICSYNC_PHOTO_ROOT 是宿主机媒体共同父目录，例如 /srv/photos；其下的 source、target 目录必须已存在、互不重叠，且位于同一文件系统。target 必须专用于本项目。用 findmnt -T /srv/photos 核实挂载和文件系统类型，并填写 PICSYNC_MEDIA_FS；NAS 可能需要 nfs4，不能照抄 ext4。
 
-控制器仅将共同父目录挂载一次为 /photos，避免分别 bind mount 源和目标导致硬链接失败。启动前检查容器只读挂载媒体；Syncthing 仅获得目标目录 /sync/photos，不获得源或共同父目录。
+控制器仅将共同父目录挂载一次为 /photos，避免分别 bind mount 源和目标导致硬链接失败。启动前的检查容器以只读方式挂载媒体目录；Syncthing 仅获得目标目录 /sync/photos，不获得源或共同父目录。
 
     docker compose config --quiet
     docker compose build controller dashboard
@@ -18,7 +18,7 @@ PICSYNC_PHOTO_ROOT 是宿主机媒体共同父目录，例如 /srv/photos；其�
 
 目录不存在、路径穿越、符号链接、重叠、挂载别名或文件系统类型不符会阻止检查通过。preflight 不写照片或数据库。
 
-NAS 必须在宿主机先挂载成功，再启动 Compose。容器内检查不能完全替代宿主机挂载依赖；不要让 NAS 未挂载时的本地空目录冒充媒体目录。准确填写文件系统类型可以拒绝大部分挂错文件系统的情况。
+NAS 必须在宿主机先挂载成功，再启动 Compose。容器内检查不能完全替代宿主机挂载依赖；不要让 NAS 未挂载时的本地空目录冒充媒体目录。准确填写文件系统类型，可以拦截大部分挂载到错误文件系统的情况。
 
 ## 2A. 外部 MySQL
 
@@ -57,7 +57,7 @@ NAS 必须在宿主机先挂载成功，再启动 Compose。容器内检查不�
 
 共享服务只监听本机 5037，不要加 -a。可沿用现有管理方式，或使用 deploy/adb/picsync-adb.service。
 
-可选 scripts/install-user-services.sh 只安装用户服务文件。只需 ADB 时仅启用 picsync-adb.service，不要将宿主机控制器与 Compose 控制器同时运行。用户服务开机运行还需要配置 linger，完成后通过实际重启验证。
+也可使用 scripts/install-user-services.sh 安装用户服务文件；该脚本只负责安装。只需 ADB 时仅启用 picsync-adb.service，不要将宿主机控制器与 Compose 控制器同时运行。用户服务开机运行还需要配置 linger，完成后通过实际重启验证。
 
 ### ADB 也在 Compose 中
 
@@ -86,7 +86,7 @@ ADB 授权在 state/adb-auth，首次使用需手机确认。controller、手机
 
     docker compose run --rm controller python controller/file_sync.py dry-run
 
-该命令核对目录边界和 Syncthing 状态，不扫描入库、不释放空间、不删除照片；它不等于整条相册 UI 自动化验证。先用专用目录和小批量做实际演练。
+该命令核对目录边界和 Syncthing 状态，不扫描入库、不释放空间、不删除照片；它不能验证完整的相册 UI 自动化流程。先用专用目录和小批量做实际演练。
 
     docker compose up -d controller dashboard syncthing
     docker compose ps
@@ -98,7 +98,7 @@ ADB 授权在 state/adb-auth，首次使用需手机确认。controller、手机
 
     docker compose --profile database --profile usb up -d --build
 
-但第一次仍建议按上面的顺序完成数据库初始化及配对，再启用控制器。所有真实配置与运行数据保持在 Git 之外。
+首次部署仍建议按上述顺序完成数据库初始化和配对，再启用控制器。实际配置与运行数据均不应提交到 Git。
 
 ## 6. 可选手机控制网页
 
@@ -119,6 +119,6 @@ ADB 授权在 state/adb-auth，首次使用需手机确认。controller、手机
 
 升级前备份数据库和私有配置，再 build 和 up 控制器、看板。不要用 down -v 或删除 state/mysql 做常规升级。
 
-备份应包含一致性 MySQL 导出、私有配置、Syncthing 状态、ADB 授权及必要的网页状态，源照片另行备份。Git 不是这些运行数据的备份。
+备份应包含保证一致性的 MySQL 导出、私有配置、Syncthing 状态、ADB 授权及必要的网页状态。源照片需另行备份。Git 不是这些运行数据的备份。
 
 迁移已有实例必须先停旧控制器、备份数据库、核对路径及批次归属，再启用新实例；不能两套控制器同时处理同一照片或数据库。

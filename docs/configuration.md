@@ -111,7 +111,7 @@ state/mysql、state/syncthing、state/adb-auth、state/pixel、state/logs、stat
 
 ### 低电量与 Syncthing 资源预算
 
-新增硬链接仅在有效手机电量至少 10% 时执行；低于 10%（包括充电时）或电量不可读时暂停，达到 10% 自动继续。电量每 60 秒读取一次，映射循环逐文件检查缓存，保留冻结候选和已处理进度。已有文件传输及清理仍使用各自原有判定条件。
+默认低于 10%（包括充电时）触发暂停，触发后需达到 20% 才自动继续；电量不可读时也暂停新增硬链接。电量采集至少间隔 60 秒，空闲时可能间隔 300 秒；映射循环逐文件检查缓存，保留冻结候选和已处理进度。已有文件传输及清理仍使用各自原有判定条件。
 
 Compose 默认限制 Syncthing 为 1 CPU，`GOMAXPROCS=1`，`GOMEMLIMIT=512MiB`（Go 内存软目标，不是容器硬上限）。可用 `SYNCTHING_CPUS`、`SYNCTHING_GOMAXPROCS`、`SYNCTHING_GOMEMLIMIT` 调整。预算较低时传输和扫描可能变慢。参考 https://docs.syncthing.net/users/tuning.html 。
 

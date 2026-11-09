@@ -10,8 +10,9 @@ class BatteryTelemetryTests(unittest.TestCase):
         ctrl.device = Mock(return_value=nullcontext())
         ctrl.phone_call = Mock(return_value={'level': 8, 'charging': True,
                                              'power_connected': True, 'status': 'charging'})
-        ctrl.c = {'mapping': {'min_battery_percent': 10}}
+        ctrl.c = {'mapping': {'min_battery_percent': 10, 'resume_battery_percent': 20}}
         ctrl.db = Mock()
+        ctrl.db.query.return_value = []
         ctrl.notify = Mock()
         ctrl.publish = Mock()
         return ctrl
@@ -66,8 +67,7 @@ class BatteryTelemetryTests(unittest.TestCase):
         ctrl.next_battery_check = 0
         ctrl.phone_call.return_value['level'] = 20
         self.assertTrue(ctrl.mapping_allowed())
-        ctrl.db.execute.assert_called_once_with(
-            'DELETE FROM controller_notifications WHERE event_key=%s', ('mapping-low-battery',))
+        self.assertTrue(ctrl.db.execute.call_args.args[0].startswith('DELETE'))
 
     def test_unknown_battery_does_not_rearm_notice(self):
         ctrl = self.controller()
@@ -87,12 +87,13 @@ class BatteryTelemetryTests(unittest.TestCase):
         ctrl.c['bark'] = dict(enabled=True, retries=0, timeout=1, error_interval=3600)
         ctrl.key = 'test-key'
         sent = {}
-        ctrl.db.query.side_effect = lambda sql, args: ([{'sent_at': sent[args[0]]}] if args[0] in sent else [])
+        ctrl.db.query.side_effect = lambda sql, args: ([{'sent_at': sent[args[0]]}] if args[0] in sent else []) if 'SELECT sent_at' in sql else [{'event_key': k} for k in args if k in sent]
         def execute(sql, args):
             if sql.startswith('REPLACE'):
                 sent[args[0]] = args[1]
             else:
-                sent.pop(args[0], None)
+                for key in args:
+                    sent.pop(key, None)
         ctrl.db.execute.side_effect = execute
         ctrl.notify = Controller.notify.__get__(ctrl)
         ctrl.mapping_battery = 9
@@ -100,10 +101,10 @@ class BatteryTelemetryTests(unittest.TestCase):
             post.return_value.json.return_value = {'code': 200}
             ctrl.battery_notice()
             ctrl.battery_notice()
-            del ctrl.battery_notice_active  # Simulate a restart; DB record remains.
+            del ctrl.battery_paused  # Simulate a restart; DB record remains.
             ctrl.battery_notice()
             self.assertEqual(post.call_count, 1)
-            ctrl.mapping_battery = 10
+            ctrl.mapping_battery = 20
             ctrl.battery_notice()
             ctrl.mapping_battery = 9
             ctrl.battery_notice()
@@ -121,4 +122,31 @@ class BatteryTelemetryTests(unittest.TestCase):
             ctrl.battery_notice()
             ctrl.battery_notice()
             self.assertEqual(post.call_count, 2)
-            ctrl.db.execute.assert_not_called()
+            self.assertTrue(all(c.args[1][0] == 'mapping-battery-paused' for c in ctrl.db.execute.call_args_list))
+
+    def test_hysteresis_across_restart_with_failed_notice(self):
+        ctrl = self.controller()
+        ctrl.phone_call.return_value['level'] = 9
+        self.assertFalse(ctrl.mapping_allowed())
+        for level in (10, 15, 19):
+            ctrl.next_battery_check = 0
+            ctrl.phone_call.return_value['level'] = level
+            self.assertFalse(ctrl.mapping_allowed())
+        del ctrl.battery_paused
+        ctrl.db.query.return_value = [{'event_key': 'mapping-battery-paused'}]
+        ctrl.next_battery_check = 0
+        self.assertFalse(ctrl.mapping_allowed())
+        ctrl.next_battery_check = 0
+        ctrl.phone_call.return_value['level'] = 20
+        self.assertTrue(ctrl.mapping_allowed())
+        ctrl.next_battery_check = 0
+        ctrl.phone_call.return_value['level'] = 15
+        self.assertTrue(ctrl.mapping_allowed())
+
+    def test_unknown_does_not_clear_pause(self):
+        ctrl = self.controller()
+        self.assertFalse(ctrl.mapping_allowed())
+        ctrl.next_battery_check = 0
+        ctrl.phone_call.side_effect = RuntimeError('offline')
+        self.assertFalse(ctrl.mapping_allowed())
+        self.assertTrue(ctrl.battery_paused)

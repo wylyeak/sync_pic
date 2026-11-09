@@ -18,6 +18,13 @@ class ConfigTests(unittest.TestCase):
             with self.subTest(value=value), self.assertRaises(ValueError):
                 self.config('[mapping]\nmin_battery_percent=' + value)
 
+    def test_resume_battery_threshold(self):
+        self.assertEqual(self.config('')['mapping']['resume_battery_percent'], 20)
+        for value in ('0', '9', '101', 'true', '20.5'):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                self.config('[mapping]\nresume_battery_percent=' + value)
+        self.assertEqual(self.config('[mapping]\nresume_battery_percent=30')['mapping']['resume_battery_percent'], 30)
+
     def test_defaults(self):
         self.assertEqual(self.config('')['mapping']['max_bytes'], 15 * 1024**3)
         self.assertEqual(self.config('')['bark']['error_threshold'], 2)

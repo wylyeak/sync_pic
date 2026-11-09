@@ -216,6 +216,7 @@ class Controller:
         except Exception as exc:
             self.mapping_battery = None
             self.publish('battery', state='error', error=type(exc).__name__)
+        self.battery_gate_ready = False
         try:
             self.battery_notice()
         except Exception:
@@ -224,18 +225,30 @@ class Controller:
     def battery_notice(self):
         level = getattr(self, 'mapping_battery', None)
         threshold = self.c['mapping']['min_battery_percent']
+        resume = self.c['mapping']['resume_battery_percent']
         if level is None:
             return
+        if not hasattr(self, 'battery_paused'):
+            # Include the old notification key when upgrading from the single threshold.
+            rows = self.db.query('SELECT event_key FROM controller_notifications WHERE event_key IN (%s,%s)',
+                                 ('mapping-battery-paused', 'mapping-low-battery'))
+            self.battery_paused = bool(rows)
         if level < threshold:
-            self.battery_notice_active = True
+            self.battery_paused = True
+        if self.battery_paused and level < resume:
+            # Persist the latch before notification, even if Bark is disabled or fails.
+            self.db.execute('REPLACE INTO controller_notifications VALUES (%s,%s)',
+                            ('mapping-battery-paused', time.time()))
+            self.battery_gate_ready = True
             self.notify('mapping-low-battery',
-                        f'手机电量低：{level}%，低于阈值 {threshold}%。新增硬链接已暂停；'
-                        f'电量达到 {threshold}% 后自动继续（充电时同样适用）。')
-        elif getattr(self, 'battery_notice_active', True):
-            # Persist deduplication across restarts; re-arm only on a valid recovery.
-            self.db.execute('DELETE FROM controller_notifications WHERE event_key=%s',
-                            ('mapping-low-battery',))
-            self.battery_notice_active = False
+                        f'手机电量低：{level}%，已触发低于 {threshold}% 的暂停。新增硬链接已暂停；'
+                        f'电量达到 {resume}% 后自动继续（充电时同样适用）。')
+        else:
+            if self.battery_paused:
+                self.db.execute('DELETE FROM controller_notifications WHERE event_key IN (%s,%s)',
+                                ('mapping-battery-paused', 'mapping-low-battery'))
+            self.battery_paused = False
+            self.battery_gate_ready = True
 
     def photos_status(self, status):
         self.publish('photos', **status)
@@ -430,9 +443,11 @@ class Controller:
     def mapping_allowed(self):
         self.refresh_battery()
         level = getattr(self, 'mapping_battery', None)
-        allowed = level is not None and level >= self.c['mapping']['min_battery_percent']
+        allowed = (level is not None and getattr(self, 'battery_gate_ready', False)
+                   and not getattr(self, 'battery_paused', True))
         self.publish('mapping', paused=not allowed, battery_level=level,
                      min_battery_percent=self.c['mapping']['min_battery_percent'],
+                     resume_battery_percent=self.c['mapping']['resume_battery_percent'],
                      reason=None if allowed else ('battery_unknown' if level is None else 'low_battery'))
         return allowed
 

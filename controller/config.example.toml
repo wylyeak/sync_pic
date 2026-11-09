@@ -5,6 +5,7 @@ interval = 3600
 progress_every = 100
 [mapping]
 min_battery_percent = 10
+resume_battery_percent = 20
 max_bytes = 16106127360
 order = "mtime_asc"
 [monitor]

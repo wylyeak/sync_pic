@@ -10,7 +10,7 @@ except ImportError:
 from target_guard import PROTECTED_SOURCE, ALLOWED_TARGET
 
 DEFAULT = Path(os.environ.get('PICSYNC_CONFIG', Path(__file__).with_name('config.toml')))
-DEFAULT_VALUES = {'directories': {'source': PROTECTED_SOURCE, 'target': ALLOWED_TARGET}, 'scan': {'interval': 3600, 'progress_every': 100}, 'mapping': {'max_bytes': 16106127360, 'order': 'mtime_asc', 'min_battery_percent': 10}, 'monitor': {'interval': 60, 'idle_interval': 300}, 'observation': {'confirmations': 3, 'interval': 300}, 'syncthing': {'config': '/etc/syncthing/config.xml', 'folder': 'photos', 'device': '', 'timeout': 10}, 'pixel': {'container': 'pixel-web', 'adb_path': 'adb', 'adb_backend': 'host', 'serial': '', 'adb_timeout': 40}, 'mysql': {'host': '127.0.0.1', 'port': 3306, 'user': 'picsync', 'database': 'picsync', 'password': ''}, 'bark': {'enabled': False, 'key': '', 'timeout': 15, 'retries': 2, 'blocked_after': 1200, 'error_interval': 3600, 'error_threshold': 2}, 'logging': {'path': 'logs/file_sync.log', 'level': 'INFO', 'max_bytes': 10485760, 'backups': 5}}
+DEFAULT_VALUES = {'directories': {'source': PROTECTED_SOURCE, 'target': ALLOWED_TARGET}, 'scan': {'interval': 3600, 'progress_every': 100}, 'mapping': {'max_bytes': 16106127360, 'order': 'mtime_asc', 'min_battery_percent': 10, 'resume_battery_percent': 20}, 'monitor': {'interval': 60, 'idle_interval': 300}, 'observation': {'confirmations': 3, 'interval': 300}, 'syncthing': {'config': '/etc/syncthing/config.xml', 'folder': 'photos', 'device': '', 'timeout': 10}, 'pixel': {'container': 'pixel-web', 'adb_path': 'adb', 'adb_backend': 'host', 'serial': '', 'adb_timeout': 40}, 'mysql': {'host': '127.0.0.1', 'port': 3306, 'user': 'picsync', 'database': 'picsync', 'password': ''}, 'bark': {'enabled': False, 'key': '', 'timeout': 15, 'retries': 2, 'blocked_after': 1200, 'error_interval': 3600, 'error_threshold': 2}, 'logging': {'path': 'logs/file_sync.log', 'level': 'INFO', 'max_bytes': 10485760, 'backups': 5}}
 
 def load(path=DEFAULT):
     result = copy.deepcopy(DEFAULT_VALUES)
@@ -46,8 +46,8 @@ def load(path=DEFAULT):
                 raise ValueError('Configuration must be positive: ' + group + '.' + key)
     if result['observation']['confirmations'] < 3 or result['observation']['interval'] < 300:
         raise ValueError('At least three observations, 300 seconds apart are required')
-    if result['mapping']['min_battery_percent'] > 100:
-        raise ValueError('mapping.min_battery_percent must be between 1 and 100')
+    if not result['mapping']['min_battery_percent'] <= result['mapping']['resume_battery_percent'] <= 100:
+        raise ValueError('Require 1 <= min_battery_percent <= resume_battery_percent <= 100')
     if result['mapping']['order'] != 'mtime_asc' or result['bark']['retries'] < 0:
         raise ValueError('Invalid ordering or retry count')
     if not 1 <= result['mysql']['port'] <= 65535:

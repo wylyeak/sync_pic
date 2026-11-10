@@ -1,11 +1,12 @@
-"""Whitelisted runtime settings, atomically persisted without credentials."""
+"""Edit whitelisted settings in the original TOML, preserving private content."""
 import copy
 import fcntl
 import hashlib
-import json
 import os
 from pathlib import Path
 import tempfile
+import tomlkit
+from configuration import DEFAULT_VALUES
 try:
     import tomllib
 except ImportError:
@@ -21,19 +22,28 @@ FIELDS = {
 }
 
 def path():
-    return Path(os.environ.get('PICSYNC_LIVE_CONFIG', '/state/settings/controller.toml'))
+    return Path(os.environ.get('PICSYNC_CONFIG', Path(__file__).with_name('config.toml')))
 
 def revision(raw):
     return hashlib.sha256(raw).hexdigest()
 
-def read():
-    try:
-        raw = path().read_bytes()
-    except FileNotFoundError:
-        raw = b''
-    values = tomllib.loads(raw.decode())
+def editable(document):
+    values = {group: {key: document.get(group, {}).get(key, DEFAULT_VALUES[group][key])
+                     for key in fields} for group, fields in FIELDS.items()}
     validate(values)
+    return values
+
+
+def read(config_path=None):
+    raw = Path(config_path or path()).read_bytes()
+    try:
+        document = tomllib.loads(raw.decode())
+        values = editable(document)
+    except (ValueError, TypeError, AttributeError, UnicodeError):
+        # Parser diagnostics may quote private configuration contents.
+        raise ValueError('控制器配置文件格式或运行参数无效') from None
     return values, revision(raw)
+
 
 def validate(values):
     if type(values) is not dict:
@@ -67,32 +77,48 @@ def merge(base, values):
 class Conflict(ValueError):
     pass
 
-def save(values, expected, base):
+def save(values, expected, base=None, config_path=None):
     validate(values)
-    target = path()
-    target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    with target.with_suffix('.lock').open('a') as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
-        current, version = read()
-        if expected != version:
-            raise Conflict('配置已被其他页面修改，请重新加载后保存')
-        combined = merge(merge(base, current), values)
-        # Persist a complete, validated snapshot of editable values only.
-        snapshot = public(combined)
-        raw = ''.join('[' + group + ']\n' + ''.join(key + ' = ' + json.dumps(value) + '\n' for key, value in fields.items()) + '\n' for group, fields in snapshot.items()).encode()
-        fd, temporary = tempfile.mkstemp(dir=target.parent, prefix='.settings-')
+    target = Path(config_path or path())
+    # The controller owns this directory; the dashboard never mounts it.
+    # A directory lock remains stable across atomic file replacements.
+    directory = os.open(target.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        fcntl.flock(directory, fcntl.LOCK_EX)
+        if target.is_symlink():
+            raise ValueError('配置文件不能是符号链接')
+        original = target.read_bytes()
+        current, version = read(target)
+        if expected != version or revision(original) != version:
+            raise Conflict('配置已被修改，请重新加载后保存')
+        snapshot = public(merge(current, values))
+        document = tomlkit.parse(original.decode())
+        changed = False
+        for group, fields in values.items():
+            for key, value in fields.items():
+                if current[group][key] != value:
+                    if group not in document:
+                        document[group] = tomlkit.table()
+                    document[group][key] = value
+                    changed = True
+        if not changed:
+            return current, version
+        raw = tomlkit.dumps(document).encode()
+        if editable(tomllib.loads(raw.decode())) != snapshot:
+            raise ValueError('配置保存校验失败')
+        fd, temporary = tempfile.mkstemp(dir=target.parent, prefix='.config-')
         try:
             with os.fdopen(fd, 'wb') as stream:
                 stream.write(raw)
                 stream.flush()
                 os.fsync(stream.fileno())
+            if target.read_bytes() != original:
+                raise Conflict('配置已被修改，请重新加载后保存')
             os.replace(temporary, target)
-            directory = os.open(target.parent, os.O_RDONLY | os.O_DIRECTORY)
-            try:
-                os.fsync(directory)
-            finally:
-                os.close(directory)
+            os.fsync(directory)
         finally:
             if os.path.exists(temporary):
                 os.unlink(temporary)
-    return snapshot, revision(raw)
+        return snapshot, revision(raw)
+    finally:
+        os.close(directory)

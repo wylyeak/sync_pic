@@ -12,14 +12,30 @@ class SettingsTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
-        self.env = patch.dict(os.environ, PICSYNC_LIVE_CONFIG=str(Path(self.tmp.name, 'controller.toml')))
+        self.env = patch.dict(os.environ, PICSYNC_CONFIG=str(Path(self.tmp.name, 'config.toml')))
         self.env.start()
         self.addCleanup(self.env.stop)
+        live_config.path().write_text('')
         self.runtime = {'controller_stale': False, 'settings': {'values': live_config.public(copy.deepcopy(DEFAULT_VALUES)), 'revision': live_config.read()[1]}}
         self.mock = patch('app.runtime', return_value=self.runtime)
         self.mock.start()
         self.addCleanup(self.mock.stop)
         self.client = web.app.test_client()
+        self.rpc = patch('app.config_service.call', side_effect=self.remote)
+        self.rpc.start()
+        self.addCleanup(self.rpc.stop)
+
+    def remote(self, method, body):
+        try:
+            values, revision = live_config.read()
+            if method == 'PUT':
+                values, revision = live_config.save(body['values'], body['revision'])
+            return dict(values=values, revision=revision, fields=live_config.FIELDS,
+                        applied=self.runtime['settings']['revision'] == revision, error=None), 200
+        except live_config.Conflict:
+            return {'error': '配置已被修改'}, 409
+        except ValueError:
+            return {'error': '配置参数无效'}, 400
 
     def put(self, values, **kwargs):
         return self.client.put('/api/settings', json={'values': values, 'revision': live_config.read()[1]}, **kwargs)
@@ -39,7 +55,7 @@ class SettingsTests(unittest.TestCase):
     def test_cross_origin_or_missing_custom_header_cannot_write(self):
         for headers in ({}, {'Origin': 'https://other.example', 'X-PicSync-Settings': '1'}):
             self.assertEqual(self.put({}, headers=headers).status_code, 403)
-        self.assertFalse(live_config.path().exists())
+        self.assertEqual(live_config.path().read_text(), '')
 
     def test_https_reverse_proxy_origin_is_accepted(self):
         self.assertEqual(self.put({}, headers={'Origin': 'https://localhost', 'X-PicSync-Settings': '1'}).status_code, 200)
@@ -49,7 +65,7 @@ class SettingsTests(unittest.TestCase):
         self.assertEqual(response.status_code, 400)
         self.runtime['controller_stale'] = True
         self.assertEqual(self.put({}, headers={'X-PicSync-Settings': '1'}).status_code, 503)
-        self.assertFalse(live_config.path().exists())
+        self.assertEqual(live_config.path().read_text(), '')
 
     def test_conflict_reports_409(self):
         revision = live_config.read()[1]

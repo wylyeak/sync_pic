@@ -20,6 +20,6 @@ CMD ["python", "controller/file_sync.py"]
 FROM base AS dashboard
 COPY dashboard/app.py dashboard/performance.py ./
 COPY dashboard/static ./static
-COPY controller/live_config.py ./live_config.py
+COPY controller/live_config.py controller/configuration.py controller/target_guard.py controller/config_service.py ./
 USER 1000:1000
 CMD ["gunicorn", "--bind", "127.0.0.1:8027", "--workers", "2", "--threads", "4", "--timeout", "30", "app:app"]

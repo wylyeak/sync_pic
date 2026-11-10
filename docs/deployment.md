@@ -212,7 +212,7 @@ docker compose stop controller
 docker compose up -d --no-build --pull never controller
 ```
 
-默认关闭 Bark；需要异常推送时，在 `controller/config.toml` 启用 `[bark]`，并在 `.env` 设置 `PICSYNC_BARK_KEY`。可选看板快捷入口使用 `PICSYNC_PIXEL_URL` 和 `PICSYNC_SYNCTHING_URL`，留空则隐藏；URL 不得包含密码或令牌。配置修改后重新创建相应服务，参数详见 [配置参考](configuration.md)。
+默认关闭 Bark；需要异常推送时，在 `controller/config.toml` 启用 `[bark]`，并在 `.env` 设置 `PICSYNC_BARK_KEY`。可选看板快捷入口使用 `PICSYNC_PIXEL_URL` 和 `PICSYNC_SYNCTHING_URL`，留空则隐藏；URL 不得包含密码或令牌。网页支持的运行参数可在页面或原 `controller/config.toml` 中修改后自动应用；环境变量与其他启动参数修改后重新创建相应服务，参数详见 [配置参考](configuration.md)。
 
 手机控制网页不是备份必需组件，也可沿用自己的手机控制服务。需要仓库提供的网页时，从 Google 官方 platform-tools 获取与 Linux 架构兼容的独立 `adb` 客户端，保存为 `state/adb-client`。不能直接复制依赖宿主机特有共享库的系统 ADB。将 `phone` 加入 `.env` 现有的 `COMPOSE_PROFILES`，保留已有选项，例如 `database,phone`。
 

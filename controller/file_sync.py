@@ -25,6 +25,7 @@ HERE = Path(__file__).resolve().parent
 sys.path[:0] = [str(HERE / '.deps'), str(HERE.parent / 'phone')]
 from configuration import load, redacted
 import live_config
+import config_service
 from batch_report import PHASES, transition, summary
 from batch_store import BatchStore
 from telemetry import Telemetry
@@ -116,9 +117,10 @@ class FailureStreak:
 
 
 class Controller:
-    def __init__(self, config, stop):
+    def __init__(self, config, stop, config_path=None):
         self.base_config = copy.deepcopy(config)
-        values, self.config_revision = live_config.read()
+        self.config_path = Path(config_path or live_config.path())
+        values, self.config_revision = live_config.read(self.config_path)
         config = live_config.merge(config, values)
         self.c, self.stop = config, stop
         self.events = queue.SimpleQueue()
@@ -147,7 +149,7 @@ class Controller:
 
     def reload_settings(self):
         try:
-            values, revision = live_config.read()
+            values, revision = live_config.read(self.config_path)
             if revision != self.config_revision:
                 updated = live_config.merge(self.base_config, values)
                 self.c = updated
@@ -182,7 +184,7 @@ class Controller:
             if remaining <= 0:
                 return False
             try:
-                if live_config.read()[1] not in (self.config_revision, getattr(self, 'rejected_config_revision', None)):
+                if live_config.read(self.config_path)[1] not in (self.config_revision, getattr(self, 'rejected_config_revision', None)):
                     return False
             except (OSError, ValueError):
                 pass
@@ -771,8 +773,9 @@ def main():
             finally:
                 db.close()
         else:
-            controller = Controller(config, stop)
-            controller.run(args.command == 'once')
+            controller = Controller(config, stop, args.config)
+            with config_service.serve(controller):
+                controller.run(args.command == 'once')
 
 if __name__ == '__main__':
     main()

@@ -3,3 +3,4 @@ PyMySQL[rsa]>=1.1,<2
 Flask>=3.0,<4
 gunicorn>=23,<24
 tomli>=2,<3; python_version < "3.11"
+tomlkit>=0.13,<1

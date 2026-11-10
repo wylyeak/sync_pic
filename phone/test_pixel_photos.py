@@ -2,7 +2,7 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 import xml.etree.ElementTree as ET
-from pixel_photos import classify, backup_status, battery_status, Phone, PKG
+from pixel_photos import classify, backup_status, battery_status, Phone, PKG, PhotosNotResponding
 
 
 class StatusTests(unittest.TestCase):
@@ -97,6 +97,32 @@ class StatusTests(unittest.TestCase):
         with patch.object(phone, 'adb', return_value='<hierarchy><node package="other.app"/></hierarchy>'):
             with self.assertRaises(RuntimeError):
                 phone.dump()
+
+    def test_photos_anr_waits_once_and_reads_fresh_status(self):
+        phone = Phone(SimpleNamespace(container='pixel-web', serial='test'))
+        dialog = '<hierarchy><node package="android" resource-id="android:id/aerr_wait" enabled="true" clickable="true" bounds="[0,10][100,50]"/></hierarchy>'
+        window = 'Window{123 u0 Application Not Responding: ' + PKG + '}'
+        healthy = '<hierarchy><node package="' + PKG + '"/></hierarchy>'
+        with patch.object(phone, 'adb', side_effect=[dialog, window, '', healthy]) as adb, patch('pixel_photos.time.sleep'):
+            self.assertEqual(phone.dump().find('node').get('package'), PKG)
+        self.assertEqual(adb.call_args_list[2].args, ('shell', 'input', 'tap', '50', '30'))
+
+    def test_persistent_anr_stops_without_close_or_loop(self):
+        phone = Phone(SimpleNamespace(container='pixel-web', serial='test'))
+        dialog = '<hierarchy><node package="android" resource-id="android:id/aerr_wait" enabled="true" clickable="true" bounds="[0,10][100,50]"/></hierarchy>'
+        window = 'Window{123 u0 Application Not Responding: ' + PKG + '}'
+        with patch.object(phone, 'adb', side_effect=[dialog, window, '', dialog, window]) as adb, patch('pixel_photos.time.sleep'):
+            with self.assertRaises(PhotosNotResponding):
+                phone.dump()
+        self.assertEqual(adb.call_count, 5)
+
+    def test_other_app_anr_is_never_clicked(self):
+        phone = Phone(SimpleNamespace(container='pixel-web', serial='test'))
+        dialog = '<hierarchy><node package="android" resource-id="android:id/aerr_wait"/></hierarchy>'
+        with patch.object(phone, 'adb', side_effect=[dialog, 'Application Not Responding: other.app}']) as adb:
+            with self.assertRaises(RuntimeError):
+                phone.dump()
+        self.assertEqual(adb.call_count, 2)
 
     def test_release_does_not_run_when_backup_is_not_complete(self):
         phone = Phone(SimpleNamespace(container='pixel-web', serial='test'))

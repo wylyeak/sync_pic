@@ -18,6 +18,13 @@ PKG = 'com.google.android.apps.photos'
 LABELS = {'complete': '同步完成', 'syncing': '同步中', 'blocked': '暂停或异常', 'unknown': '状态未知'}
 
 
+class PhotosNotResponding(RuntimeError):
+    """Safe, user-facing diagnostic without raw ADB output."""
+
+    def __init__(self):
+        super().__init__('Google 相册没有响应，已选择等待；恢复后自动重试')
+
+
 def classify(labels):
     text = '\n'.join(labels)
     if re.search(r'暂停|关闭|等待|无法|失败|空间不足|已满|未开启|未启用|过热|电量不足|温度过高|paused|off\b|waiting|unable|failed|full\b|too hot|overheat|battery low', text, re.I):
@@ -95,7 +102,7 @@ class Phone:
             raise RuntimeError(p.stderr.strip() or p.stdout.strip())
         return p.stdout
 
-    def dump(self, before=(), settle=0):
+    def dump(self, before=(), settle=0, recover_anr=True):
         # One Docker/ADB call instead of separate rm, dump and cat calls. The
         # fresh file and test -s prevent an unsuccessful dump reusing old XML.
         path = '/data/local/tmp/codex-google-photos-ui.xml'
@@ -106,6 +113,18 @@ class Phone:
                      shlex.join(['uiautomator', 'dump', '--compressed', path]) + ' >/dev/null',
                      shlex.join(['test', '-s', path]), shlex.join(['cat', path])]
         root = ET.fromstring(self.adb('shell', ' && '.join(commands)))
+        wait = any(n.get('package') == 'android' and
+                   n.get('resource-id') == 'android:id/aerr_wait'
+                   for n in root.iter('node'))
+        if wait:
+            # Confirm the affected package from Android, not a translated title.
+            windows = self.adb('shell', 'dumpsys', 'window', 'windows')
+            if re.search(r'Application Not Responding: ' + re.escape(PKG) + r'(?:\s|\})', windows):
+                if recover_anr:
+                    self.tap(root, lambda n: n.get('package') == 'android' and
+                             n.get('resource-id') == 'android:id/aerr_wait')
+                    return self.dump(settle=1, recover_anr=False)
+                raise PhotosNotResponding()
         if not any(n.get('package') == PKG for n in root.iter('node')):
             raise RuntimeError('Google 相册未在前台；请解锁手机，关闭其他弹窗后重试')
         return root

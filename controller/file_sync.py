@@ -32,7 +32,7 @@ from cleanup_target import fingerprint
 from relaxed_cleanup import snapshot_targets
 from target_guard import TargetDirectory, PROTECTED_SOURCE
 from syncthing_state import SyncthingState
-from pixel_photos import Phone, backup_status
+from pixel_photos import Phone, backup_status, PhotosNotResponding
 import requests
 
 log = logging.getLogger('filesync')
@@ -199,6 +199,8 @@ class Controller:
     def phone_call(self, operation, *args, **kwargs):
         try:
             return getattr(self.phone, operation)(*args, **kwargs)
+        except PhotosNotResponding as exc:
+            raise PhoneUnavailable(str(exc)) from None
         except Exception as exc:
             raise PhoneUnavailable('手机连接或相册界面异常：' + type(exc).__name__) from None
 

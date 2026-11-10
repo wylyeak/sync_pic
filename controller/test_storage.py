@@ -69,6 +69,24 @@ class InventoryTest(unittest.TestCase):
     def row(self, path):
         return self.db.query('SELECT * FROM files WHERE source_key=%s', (path_key(os.path.relpath(path, self.source)),))[0]
 
+    def test_capture_metadata_backfill_cache_and_changed_file(self):
+        path = self.create('photo.jpg')
+        with patch('storage.capture_time', return_value='2020-01-02T03:04:05') as read, patch('storage.creation_time', return_value='2021-02-03T04:05:06+00:00'):
+            self.scan()
+            self.assertEqual(self.row(path)['captured_at'], '2020-01-02T03:04:05')
+            self.scan()
+            self.assertEqual(read.call_count, 1)
+            self.db.execute('UPDATE files SET capture_fingerprint=NULL')
+            self.scan()
+            self.assertEqual(read.call_count, 2)
+        with open(path, 'ab') as stream:
+            stream.write(b'changed')
+        with patch('storage.capture_time', return_value=None), patch('storage.creation_time', return_value='2021-02-03T04:05:06+00:00'):
+            self.scan()
+        row = self.row(path)
+        self.assertIsNone(row['captured_at'])
+        self.assertEqual(row['file_created_at'], '2021-02-03T04:05:06+00:00')
+
     def test_lifecycle_and_record_deletion(self):
         path = self.create('file')
         self.scan()

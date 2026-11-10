@@ -332,7 +332,7 @@ def batch_detail(batch_id):
     row = round_row(raw)
     return jsonify(row)
 
-FILE_FIELDS = ('id,source_path,size_bytes,status,source_present,mtime_ns,first_seen_at,last_seen_at,'
+FILE_FIELDS = ('id,captured_at,file_created_at,source_path,size_bytes,status,source_present,mtime_ns,first_seen_at,last_seen_at,'
                'linked_at,deleted_at,deletion_origin,deletion_reason,backup_state,backup_checked_at,last_error')
 
 @app.route('/api/files')

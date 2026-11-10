@@ -9,6 +9,7 @@ from contextlib import contextmanager
 
 import pymysql
 from target_guard import TargetDirectory
+from photo_metadata import capture_time, creation_time
 
 DatabaseError = pymysql.MySQLError
 
@@ -76,6 +77,9 @@ class Inventory:
             ) ENGINE=InnoDB''')
             # Additive migration: old deleted rows remain unknown, never guessed.
             deletion_columns = {
+                'captured_at': 'VARCHAR(40) NULL',
+                'file_created_at': 'VARCHAR(40) NULL',
+                'capture_fingerprint': 'VARCHAR(160) NULL',
                 'deletion_origin': "VARCHAR(20) NOT NULL DEFAULT 'unknown'",
                 'deletion_reason': 'TEXT NULL',
                 'backup_checked_at': 'VARCHAR(40) NULL',
@@ -304,7 +308,7 @@ class Inventory:
 
     def lock_source(self, path, details=False):
         validate_relative(path)
-        rows = self.query('SELECT source_path,target_path,status,source_present,size_bytes FROM files WHERE source_key=%s FOR UPDATE',
+        rows = self.query('SELECT source_path,target_path,status,source_present,size_bytes,captured_at,file_created_at,capture_fingerprint FROM files WHERE source_key=%s FOR UPDATE',
                           (path_key(path),))
         if rows and rows[0]['source_path'] != path:
             raise self.collision('source', path_key(path), rows[0]['source_path'], path, 'source_lookup')
@@ -327,6 +331,13 @@ class Inventory:
                 existing = int(previous is not None)
                 self.check_path('target', row[3])
                 self.execute('INSERT INTO source_scan VALUES (%s,%s,%s,%s,%s,%s,%s,%s)', row)
+                fingerprint = ':'.join(str(value) for value in row[4:])
+                if previous is None or previous['capture_fingerprint'] != fingerprint:
+                    captured = capture_time(file_path(source, row[1]))
+                    created = creation_time(file_path(source, row[1]))
+                else:
+                    captured = previous['captured_at']
+                    created = previous['file_created_at']
                 if existing:
                     self.execute("""UPDATE files SET target_key=%s,target_path=%s,
                         size_bytes=%s,mtime_ns=%s,source_dev=%s,source_ino=%s,
@@ -340,6 +351,9 @@ class Inventory:
                          source_dev,source_ino,root_key,source_root,first_seen_at,last_seen_at)
                         VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
                         row + (path_key('.'), '.', stamp, stamp))
+                if previous is None or previous['capture_fingerprint'] != fingerprint:
+                    self.execute('UPDATE files SET captured_at=%s,file_created_at=%s,capture_fingerprint=%s WHERE source_key=%s AND BINARY source_path=BINARY %s',
+                                 (captured, created, fingerprint, row[0], row[1]))
             stats['files'] += 1
             stats['size_bytes'] += row[4]
             stats['existing'] += existing

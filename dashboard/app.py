@@ -1,4 +1,4 @@
-"""Read-only photo synchronization dashboard; no filesystem or device actions."""
+"""Photo synchronization dashboard with whitelisted runtime settings."""
 from contextlib import contextmanager
 from functools import lru_cache, wraps
 import hashlib
@@ -18,10 +18,12 @@ except ImportError:
 import pymysql
 from flask import Flask, jsonify, request, send_from_directory, g, has_request_context
 from performance import TTLCache, ReadPool
+import live_config
 
 ROOT = Path(__file__).resolve().parent
 app = Flask(__name__, static_folder='static')
 app.json.ensure_ascii = False
+app.config['MAX_CONTENT_LENGTH'] = 16384
 
 
 @lru_cache(maxsize=1)
@@ -243,6 +245,38 @@ def health():
 @app.route('/api/version')
 def version():
     return jsonify(build_info())
+
+@app.route('/api/settings', methods=['GET', 'PUT'])
+def runtime_settings():
+    run = runtime()
+    effective = run.get('settings', {})
+    base = effective.get('values')
+    if not base:
+        return jsonify(error='等待控制器发布配置后重试'), 503
+    try:
+        values, version = live_config.read()
+        if request.method == 'PUT':
+            # JSON plus a custom header prevents cross-origin form writes;
+            # Origin validation also rejects cross-origin scripted requests.
+            origin = request.headers.get('Origin')
+            if (origin and (urlsplit(origin).scheme not in ('http', 'https') or urlsplit(origin).netloc != request.host)) or request.headers.get('X-PicSync-Settings') != '1' or not request.is_json:
+                return jsonify(error='配置保存必须来自本站页面'), 403
+            if run.get('controller_stale'):
+                return jsonify(error='控制器离线，暂不能保存配置'), 503
+            body = request.get_json()
+            if type(body) is not dict or set(body) != {'values', 'revision'}:
+                raise ValueError('请求格式无效')
+            values, version = live_config.save(body['values'], body['revision'], base)
+        desired = live_config.public(live_config.merge(base, values))
+        return jsonify(values=desired, revision=version, fields=live_config.FIELDS,
+                       applied=effective.get('revision') == version,
+                       error=effective.get('error'), controller_stale=run.get('controller_stale', True))
+    except live_config.Conflict as exc:
+        return jsonify(error=str(exc)), 409
+    except ValueError as exc:
+        return jsonify(error=str(exc)), 400
+    except OSError:
+        return jsonify(error='配置文件读写失败，原配置保留'), 503
 
 @app.route('/api/overview')
 def overview():

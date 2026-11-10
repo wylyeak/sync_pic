@@ -4,7 +4,7 @@
 [![Controller 镜像版本](https://img.shields.io/docker/v/wangyulie/sync-pic-controller/latest?label=controller&logo=docker)](https://hub.docker.com/r/wangyulie/sync-pic-controller/tags)
 [![Dashboard 镜像版本](https://img.shields.io/docker/v/wangyulie/sync-pic-dashboard/latest?label=dashboard&logo=docker)](https://hub.docker.com/r/wangyulie/sync-pic-dashboard/tags)
 
-PicSync 在同一文件系统内为源照片创建硬链接，放入专用目标目录，再通过 Syncthing 同步到 Android 手机。Google 相册完成备份后，PicSync 释放手机空间，并追踪目标目录中的同步删除。只读看板展示批次、文件、异常、手机电量和备份进度。
+PicSync 在同一文件系统内为源照片创建硬链接，放入专用目标目录，再通过 Syncthing 同步到 Android 手机。Google 相册完成备份后，PicSync 释放手机空间，并追踪目标目录中的同步删除。看板展示批次、文件、异常、手机电量和备份进度，并提供持久化、无需重启的运行配置入口。
 
 ## 开始使用
 
@@ -13,7 +13,7 @@ PicSync 在同一文件系统内为源照片创建硬链接，放入专用目标
 | 服务 | 已发布镜像 |
 | --- | --- |
 | 备份控制器、目录检查和可选 ADB | `wangyulie/sync-pic-controller` |
-| 只读看板 | `wangyulie/sync-pic-dashboard` |
+| 看板与运行配置 | `wangyulie/sync-pic-dashboard` |
 
 按 [用户部署教程](docs/deployment.md) 完成首次安装：
 

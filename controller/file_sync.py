@@ -24,6 +24,7 @@ import uuid
 HERE = Path(__file__).resolve().parent
 sys.path[:0] = [str(HERE / '.deps'), str(HERE.parent / 'phone')]
 from configuration import load, redacted
+import live_config
 from batch_report import PHASES, transition, summary
 from batch_store import BatchStore
 from telemetry import Telemetry
@@ -116,6 +117,9 @@ class FailureStreak:
 
 class Controller:
     def __init__(self, config, stop):
+        self.base_config = copy.deepcopy(config)
+        values, self.config_revision = live_config.read()
+        config = live_config.merge(config, values)
         self.c, self.stop = config, stop
         self.events = queue.SimpleQueue()
         self.source, self.target = config['directories']['source'], config['directories']['target']
@@ -140,6 +144,51 @@ class Controller:
             self.round['observations'] = 0
             self.save()
         self.needs_recovery = True
+
+    def reload_settings(self):
+        try:
+            values, revision = live_config.read()
+            if revision != self.config_revision:
+                updated = live_config.merge(self.base_config, values)
+                self.c = updated
+                self.next_battery_check = 0
+                self.observation.reset()
+                if self.round:
+                    self.save()
+                self.config_revision = revision
+                log.info('Runtime settings applied revision=%s', revision)
+            self.publish('settings', revision=self.config_revision,
+                         values=live_config.public(self.c), error=None)
+        except Exception as exc:
+            self.rejected_config_revision = locals().get('revision')
+            self.publish('settings', revision=self.config_revision,
+                         values=live_config.public(self.c), error='配置未应用：' + type(exc).__name__)
+            log.warning('Runtime settings reload rejected: %s', type(exc).__name__)
+
+    def wait_scan(self):
+        started = time.monotonic()
+        while not self.stop.is_set():
+            remaining = self.c['scan']['interval'] - (time.monotonic() - started)
+            if remaining <= 0:
+                return False
+            if self.stop.wait(min(1, remaining)):
+                return True
+        return True
+
+    def wait_settings(self, delay):
+        deadline = time.monotonic() + delay
+        while not self.stop.is_set():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return False
+            try:
+                if live_config.read()[1] not in (self.config_revision, getattr(self, 'rejected_config_revision', None)):
+                    return False
+            except (OSError, ValueError):
+                pass
+            if self.stop.wait(min(1, remaining)):
+                return True
+        return True
 
     def publish(self, section, **values):
         telemetry = getattr(self, 'telemetry', None)
@@ -342,6 +391,7 @@ class Controller:
         db = None
         failures = FailureStreak(self.c['bark']['error_threshold'])
         while not self.stop.is_set():
+            failures.threshold = self.c['bark']['error_threshold']
             try:
                 db = db or self.connect()
                 ensure_storage(self.source)
@@ -371,7 +421,7 @@ class Controller:
                     with suppress(Exception):
                         db.close()
                     db = None
-            if self.stop.wait(self.c['scan']['interval']):
+            if self.wait_scan():
                 break
         if db:
             db.close()
@@ -615,6 +665,8 @@ class Controller:
             while not self.stop.is_set():
                 tick_started = time.monotonic()
                 try:
+                    self.reload_settings()
+                    failures.threshold = self.c['bark']['error_threshold']
                     self.publish('controller', state='checking')
                     self.refresh_battery()
                     self.flush_batch_reports()
@@ -663,7 +715,7 @@ class Controller:
                     delay = self.c['monitor']['interval']
                 # Keep the configured polling cadence inclusive of API time.
                 delay = max(0, delay - (time.monotonic() - tick_started))
-                if once or self.stop.wait(delay):
+                if once or self.wait_settings(delay):
                     break
         finally:
             self.publish('controller', state='stopped')

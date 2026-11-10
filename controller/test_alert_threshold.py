@@ -15,6 +15,7 @@ class ScannerAlertThresholdTests(unittest.TestCase):
         c.stop = Mock()
         c.stop.is_set.return_value = False
         c.stop.wait.side_effect = [False] * (len(steps)-1) + [True]
+        c.wait_scan = c.stop.wait
         db = Mock()
         db.scan_source.side_effect = steps
         c.connect = Mock(return_value=db)

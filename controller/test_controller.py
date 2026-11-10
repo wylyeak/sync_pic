@@ -178,6 +178,7 @@ class ControllerTests(unittest.TestCase):
     def test_closed_connection_does_not_prevent_reconnect(self):
         from unittest.mock import Mock, patch
         value = self.controller()
+        value.reload_settings = Mock()
         value.tick = Mock(side_effect=RuntimeError('database failed'))
         value.db.close.side_effect = RuntimeError('already closed')
         replacement = Mock()

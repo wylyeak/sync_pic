@@ -181,7 +181,7 @@ function openDrawer(){state.drawerVersion++;state.drawerOpener=document.activeEl
 function closeDrawer(){state.drawerVersion++;$('drawer-overlay').hidden=true;$('drawer').hidden=true;document.body.style.overflow='';state.drawerOpener?.focus();}
 async function batchDetail(id){const version=openDrawer();try{const row=await api('/api/batches/'+encodeURIComponent(id));if($('drawer').hidden||version!==state.drawerVersion)return;const durations={...row.phase_seconds};if(row.phase!=='complete'&&row.phase_started_at)durations[row.phase]=(durations[row.phase]||0)+Math.max(0,Date.now()/1000-row.phase_started_at);const maximum=Math.max(1,...Object.values(durations).map(Number));$('drawer-content').innerHTML=`<h2 id="drawer-title">批次详情 ${phaseBadge(row)}</h2><div class="mono">${esc(row.id)}</div><div class="detail-grid">${detailItem('开始时间',date(row.started_at))}${detailItem('结束时间',row.ended_at?date(row.ended_at):'正在进行')}${detailItem('本批文件',num(row.file_count)+' 个')}${detailItem('整体备份确认',row.backed_up==null?'未记录':num(row.backed_up)+' 个')}${detailItem('手动删除成功',row.summary?num(row.summary.manual_deleted)+' 个':'待批次结束统计')}${detailItem('文件变化待核查',num(row.deferred)+' 个')}${detailItem('观察次数',num(row.observations)+' / 3')}${detailItem('总耗时',row.started_at?elapsed((row.ended_at||Date.now()/1000)-row.started_at):'未记录')}</div><div class="detail-note">备份数按相册整体完成状态确认，不代表本轮新增上传量。${row.timing_partial?' 此批在统计升级前已开始，历史阶段耗时没有补造。':''}</div><h3>各阶段耗时 <span class="subtle">含等待与重启间隔</span></h3>${Object.entries(phaseLabels).filter(([p])=>p!=='complete').map(([p,label])=>`<div class="phase-time-row"><span>${label}</span><div class="phase-time-track"><div class="phase-time-bar" style="width:${Math.max(0,Math.min(100,Number(durations[p]||0)/maximum*100))}%"></div></div><span>${elapsed(durations[p]||0)}</span></div>`).join('')}<button class="primary-button" data-batch-files="${esc(row.id)}">查看本批文件 ↗</button>${row.summary?.body?`<h3>批次完成报告</h3><div class="detail-note">${esc(row.summary.body)}</div>`:''}`;}catch(error){if(version===state.drawerVersion)$('drawer-content').innerHTML=empty(error.message);}}
 async function fileDetail(id){const version=openDrawer();try{const row=await api('/api/files/'+Number(id));if($('drawer').hidden||version!==state.drawerVersion)return;$('drawer-content').innerHTML=`<h2 id="drawer-title">${esc(row.source_path.split('/').pop())}</h2><div class="mono">${esc(row.source_path)}</div><div class="detail-grid">${detailItem('文件大小',bytes(row.size_bytes))}${detailItem('目标状态',statusLabel[row.status]||row.status)}${detailItem('备份确认方式',backupLabel[row.backup_state]||row.backup_state)}${detailItem('源库存状态',row.source_present?'最近扫描存在':'最近扫描未发现')}${detailItem('源修改时间',row.mtime_ns?date(Number(row.mtime_ns)/1e9):'未记录')}${detailItem('建立链接时间',date(row.linked_at))}${detailItem('检测删除时间',date(row.deleted_at))}${detailItem('删除来源',originLabel[row.deletion_origin]||row.deletion_origin)}</div>${row.last_error?`<div class="detail-note">${esc(row.last_error)}</div>`:''}${row.batch_id?`<button class="text-link" data-batch="${esc(row.batch_id)}">所属批次 ${esc(row.batch_id.slice(0,8).toUpperCase())} ↗</button>`:''}<h3>相关删除审计</h3>${row.audits.length?row.audits.map(a=>`<div class="event"><span class="event-dot ${a.state==='deleted'?'green':''}"></span><div class="event-text">${esc(originLabel[a.origin]||a.origin)} · ${esc(statusLabel[a.state]||a.state)}<br>${esc(reasonLabel[a.reason]||(String(a.reason||'').startsWith('remote_tombstone:')?'Pixel 端删除证据':a.reason)||'无附加说明')}${a.error_message?'<br>'+esc(a.error_message):''}<span class="event-time">#${Number(a.id)} · ${esc(date(a.created_at))}</span></div></div>`).join(''):empty('此文件尚无删除审计')}`;}catch(error){if(version===state.drawerVersion)$('drawer-content').innerHTML=empty(error.message);}}
-const viewCopy={overview:['同步总览','每一份回忆，都妥善保存。','从 NAS 到 Pixel，再到云端，查看照片同步与备份的每一步。'],batches:['批次历史','回看每一批，保存每一步。','从开始到结束，查看备份结果与各阶段累计耗时。'],files:['文件明细','每一个文件，都有迹可循。','从待处理到备份完成，检索照片路径与库存状态。'],audits:['删除审计','清理目标空间，保留源照片。','核对删除来源、执行结果，以及每次清理留下的审计记录。']};
+const viewCopy={settings:['运行配置','按你的节奏，安排备份。','调整同步参数，保存后自动应用并持久保留。'],overview:['同步总览','每一份回忆，都妥善保存。','从 NAS 到 Pixel，再到云端，查看照片同步与备份的每一步。'],batches:['批次历史','回看每一批，保存每一步。','从开始到结束，查看备份结果与各阶段累计耗时。'],files:['文件明细','每一个文件，都有迹可循。','从待处理到备份完成，检索照片路径与库存状态。'],audits:['删除审计','清理目标空间，保留源照片。','核对删除来源、执行结果，以及每次清理留下的审计记录。']};
 async function changeView(){
  const name=location.hash.slice(1),view=viewCopy[name]?name:'overview';state.view=view;
  Object.keys(viewCopy).forEach(v=>$(v).hidden=v!==view);
@@ -217,7 +217,7 @@ function refreshRuntime(){
 async function refresh({background=true}={}){
  const view=state.view;state.refreshPending[view]=(state.refreshPending[view]||0)+1;$('refresh').disabled=true;
  try{
-  const jobs=view==='overview'?[refreshOverview(),refreshRuntime()]:[refreshRuntime(),list(view,{background})];
+  const jobs=view==='settings'?[refreshSettings({render:!background})]:view==='overview'?[refreshOverview(),refreshRuntime()]:[refreshRuntime(),list(view,{background})];
   const results=await Promise.allSettled(jobs);
   const failure=results.find(r=>r.status==='rejected'&&r.reason.name!=='AbortError');
   if(failure&&view===state.view){banner(failure.reason.message+'；保留上次数据，稍后自动重试。');$('updated').textContent='更新失败 · '+new Date().toLocaleTimeString('zh-CN');}
@@ -229,4 +229,30 @@ $('close-drawer').addEventListener('click',closeDrawer);$('drawer-overlay').addE
 document.addEventListener('keydown',event=>{if($('drawer').hidden)return;if(event.key==='Escape')closeDrawer();if(event.key==='Tab'){const focusable=$('drawer').querySelectorAll('button,a,input,select');const first=focusable[0],last=focusable[focusable.length-1];if(event.shiftKey&&document.activeElement===first){event.preventDefault();last.focus();}else if(!event.shiftKey&&document.activeElement===last){event.preventDefault();first.focus();}}});
 let debounce;['files-query','audits-query'].forEach(id=>$(id).addEventListener('input',()=>{clearTimeout(debounce);debounce=setTimeout(()=>{const view=id.split('-')[0];state.pages[view]=1;list(view).catch(e=>banner(e.message));},300);}));
 ['files-status','audits-origin','audits-state'].forEach(id=>$(id).addEventListener('change',()=>{const view=id.split('-')[0];state.pages[view]=1;list(view).catch(e=>banner(e.message));}));
+let settingsSnapshot=null,settingsDirty=false,settingsSaving=false;
+const settingGroups={scan:'源目录扫描',mapping:'新批次与电量',monitor:'检查频率',observation:'清理前观察',bark:'Bark 通知'};
+async function refreshSettings({render=false}={}){
+ const data=await api('/api/settings',{cacheMs:0});
+ $('settings-status').textContent=data.controller_stale?'控制器离线':data.error?'应用失败':data.applied?'已生效':'已保存 · 等待应用';
+ $('settings-status').className='badge '+(data.applied&&!data.controller_stale?'green':'neutral');
+ if(data.error)$('settings-message').textContent=data.error;
+ if(!settingsSnapshot||render&&!settingsDirty&&!settingsSaving){
+  settingsSnapshot=data;
+  $('settings-fields').innerHTML=Object.entries(data.fields).map(([group,fields])=>`<fieldset><legend>${esc(settingGroups[group]||group)}</legend><div class="settings-grid">${Object.entries(fields).map(([key,[label,min,max]])=>`<label>${esc(label)}<input data-group="${esc(group)}" data-key="${esc(key)}" type="${min===null?'checkbox':'number'}" ${min===null?(data.values[group][key]?'checked':''):`min="${min}" max="${max}" step="1" value="${data.values[group][key]}" required`}></label>`).join('')}</div></fieldset>`).join('');
+ }
+}
+$('settings-form').addEventListener('input',()=>{settingsDirty=true;$('settings-message').textContent='有未保存的修改';});
+$('settings-reload').addEventListener('click',()=>{settingsDirty=false;$('settings-message').textContent='';refreshSettings({render:true}).catch(e=>{$('settings-message').textContent=e.message;});});
+$('settings-form').addEventListener('submit',async event=>{
+ event.preventDefault();if(!settingsSnapshot||settingsSaving)return;
+ const values={};$('settings-fields').querySelectorAll('input').forEach(input=>{(values[input.dataset.group]??={})[input.dataset.key]=input.type==='checkbox'?input.checked:Number(input.value);});
+ settingsSaving=true;$('settings-save').disabled=true;$('settings-reload').disabled=true;
+ try{
+  const response=await fetch('/api/settings',{method:'PUT',headers:{'Content-Type':'application/json','X-PicSync-Settings':'1'},body:JSON.stringify({values,revision:settingsSnapshot.revision}),signal:AbortSignal.timeout(15000)});
+  const data=await response.json();if(!response.ok)throw new Error(data.error||'保存失败');
+  settingsSnapshot=data;settingsDirty=false;$('settings-message').textContent='已保存，等待控制器应用';
+  await refreshSettings();
+ }catch(error){$('settings-message').textContent=error.message;}
+ finally{settingsSaving=false;$('settings-save').disabled=false;$('settings-reload').disabled=false;}
+});
 $('refresh').addEventListener('click',()=>{state.apiCache.clear();refresh({background:false});});window.addEventListener('hashchange',changeView);changeView();setInterval(()=>{if(!document.hidden)refresh();},10000);document.addEventListener('visibilitychange',()=>{if(!document.hidden)refresh();});

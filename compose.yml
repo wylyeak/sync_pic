@@ -33,6 +33,7 @@ services:
       TZ: ${TZ:-Asia/Shanghai}
       PICSYNC_CONFIG: /app/config.toml
       PICSYNC_TELEMETRY: /state/status/runtime.json
+      PICSYNC_LIVE_CONFIG: /state/settings/controller.toml
       PICSYNC_ADB_PATH: /app/deploy/adb/adb-client.sh
       PICSYNC_SERIAL: ${PICSYNC_SERIAL:-}
       PICSYNC_SYNCTHING_CONFIG: /etc/syncthing/config.xml
@@ -72,11 +73,13 @@ services:
       PICSYNC_MYSQL_USER: ${PICSYNC_DASHBOARD_MYSQL_USER:-picsync_reader}
       PICSYNC_MYSQL_PASSWORD: ${PICSYNC_DASHBOARD_MYSQL_PASSWORD:-}
       PICSYNC_MYSQL_DATABASE: ${PICSYNC_MYSQL_DATABASE:-picsync}
+      PICSYNC_LIVE_CONFIG: /data/settings/controller.toml
       PICSYNC_PIXEL_URL: ${PICSYNC_PIXEL_URL:-}
       PICSYNC_SYNCTHING_URL: ${PICSYNC_SYNCTHING_URL:-}
     volumes:
       - ./dashboard/config.toml:/app/config.toml:ro
       - ./state/status:/data/status:ro
+      - ./state/settings:/data/settings
     read_only: true
     tmpfs:
       - /tmp:size=32m,mode=1777

@@ -131,6 +131,8 @@ class ConsecutiveAlertTests(unittest.TestCase):
         c.events = queue.SimpleQueue()
         for event in source_events:
             c.events.put(event)
+        c.reload_settings = Mock()
+        c.wait_settings = c.stop.wait
         c.refresh_battery = Mock()
         c.flush_batch_reports = Mock()
         c.tick = Mock(side_effect=steps)

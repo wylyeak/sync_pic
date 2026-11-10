@@ -17,25 +17,44 @@ def socket_path():
     return Path(os.environ.get('PICSYNC_CONFIG_SOCKET', '/state/status/config.sock'))
 
 
-def call(method, body=None):
+def connection():
     class Connection(http.client.HTTPConnection):
         def connect(self):
             self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
             self.sock.settimeout(self.timeout)
             self.sock.connect(str(socket_path()))
-    connection = Connection('localhost', timeout=15)
+    return Connection('localhost', timeout=15)
+
+
+def call(method, body=None):
+    client = connection()
     try:
-        connection.request(method, '/settings', body=json.dumps(body) if body is not None else None,
+        client.request(method, '/settings', body=json.dumps(body) if body is not None else None,
                            headers={'Content-Type': 'application/json'})
-        response = connection.getresponse()
+        response = client.getresponse()
         data = json.loads(response.read(MAX_BODY + 1))
         return data, response.status
     finally:
-        connection.close()
+        client.close()
+
+
+def preview(relative, etag=None):
+    client = connection()
+    try:
+        client.request('POST', '/preview', body=json.dumps({'path': relative, 'etag': etag}),
+                       headers={'Content-Type': 'application/json'})
+        response = client.getresponse()
+        return client, response
+    except BaseException:
+        client.close()
+        raise
 
 
 @contextmanager
 def serve(controller):
+    # Import lazily: dashboard only needs the socket client, no photo access.
+    from photo_preview import open_image, PreviewError
+    preview_slots = threading.BoundedSemaphore(3)
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *_):
             pass  # Never log request payloads or parser diagnostics.
@@ -71,16 +90,50 @@ def serve(controller):
         def do_GET(self):
             self.handle_settings()
 
+        def do_POST(self):
+            if self.path != '/preview' or not hasattr(controller, 'source'):
+                return self.respond({'error': '预览不可用'}, 404)
+            if not preview_slots.acquire(blocking=False):
+                return self.respond({'error': '预览繁忙'}, 503)
+            try:
+                size = int(self.headers.get('Content-Length', '0'))
+                if not 0 < size <= MAX_BODY:
+                    raise ValueError()
+                body = json.loads(self.rfile.read(size))
+                if type(body) is not dict or set(body) != {'path', 'etag'}:
+                    raise ValueError()
+                stream, size, mime, etag = open_image(controller.source, body['path'])
+                with stream:
+                    self.send_response(304 if body['etag'] == etag else 200)
+                    self.send_header('Content-Type', mime)
+                    self.send_header('ETag', etag)
+                    self.send_header('Content-Length', str(0 if body['etag'] == etag else size))
+                    self.end_headers()
+                    if body['etag'] != etag:
+                        while block := stream.read(65536):
+                            self.wfile.write(block)
+            except PreviewError as exc:
+                return self.respond({'error': '照片预览不可用'}, exc.status)
+            except (ValueError, TypeError):
+                return self.respond({'error': '预览参数无效'}, 400)
+            except OSError:
+                pass  # Browser cancelled or a source became unavailable during transfer.
+            finally:
+                preview_slots.release()
+
         def do_PUT(self):
             self.handle_settings(write=True)
 
         def respond(self, data, status):
             raw = json.dumps(data, ensure_ascii=False).encode()
-            self.send_response(status)
-            self.send_header('Content-Type', 'application/json')
-            self.send_header('Content-Length', str(len(raw)))
-            self.end_headers()
-            self.wfile.write(raw)
+            try:
+                self.send_response(status)
+                self.send_header('Content-Type', 'application/json')
+                self.send_header('Content-Length', str(len(raw)))
+                self.end_headers()
+                self.wfile.write(raw)
+            except OSError:
+                pass  # Normal cancellation while a browser moves to another file.
 
     class Server(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
         daemon_threads = True

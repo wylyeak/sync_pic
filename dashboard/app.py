@@ -1,6 +1,7 @@
 """Photo synchronization dashboard with whitelisted runtime settings."""
 from contextlib import contextmanager
 from functools import lru_cache, wraps
+import http.client
 import hashlib
 import gzip
 import json
@@ -203,17 +204,19 @@ def start_timing():
 
 @app.after_request
 def headers(response):
-    response.headers['Cache-Control'] = ('public, max-age=31536000, immutable' if request.path.startswith('/static/') and request.args.get('v') else
+    default_cache = ('public, max-age=31536000, immutable' if request.path.startswith('/static/') and request.args.get('v') else
         'public, max-age=3600' if request.path.startswith('/static/') else 'no-store' if request.path.startswith('/api/') else 'no-cache')
+    if request.endpoint != 'file_preview' or response.status_code not in (200, 304):
+        response.headers['Cache-Control'] = default_cache
     response.headers['Server-Timing'] = 'app;dur=%.2f, db;dur=%.2f, pool;dur=%.2f' % (
         (time.perf_counter() - getattr(g, 'started_at', time.perf_counter())) * 1000, getattr(g, 'db_ms', 0), getattr(g, 'pool_ms', 0))
-    if request.path.startswith('/api/') and 'gzip' in request.accept_encodings and response.status_code == 200 and len(response.get_data()) > 512:
+    if response.mimetype == 'application/json' and not response.is_streamed and request.path.startswith('/api/') and 'gzip' in request.accept_encodings and response.status_code == 200 and len(response.get_data()) > 512:
         response.set_data(gzip.compress(response.get_data(), compresslevel=3))
         response.headers['Content-Encoding'] = 'gzip'
         response.vary.add('Accept-Encoding')
     response.headers['X-Content-Type-Options'] = 'nosniff'
     response.headers['Referrer-Policy'] = 'same-origin'
-    response.headers['Content-Security-Policy'] = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; frame-ancestors 'self'; base-uri 'none'"
+    response.headers['Content-Security-Policy'] = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; worker-src 'self' blob:; frame-ancestors 'self'; base-uri 'none'"
     return response
 
 @lru_cache(maxsize=4)
@@ -364,6 +367,43 @@ def files():
         table = 'files FORCE INDEX (files_source_key)' if request.args.get('batch') else 'files'
         result = paginated(cur, table, FILE_FIELDS, conditions, params, 'mtime_ns DESC,id DESC')
     return jsonify(result)
+
+@app.route('/api/files/<int:file_id>/preview')
+def file_preview(file_id):
+    with db() as cur:
+        cur.execute('SELECT source_path FROM files WHERE id=%s', (file_id,))
+        row = cur.fetchone()
+    if row is None:
+        return jsonify(error='文件不存在'), 404
+    try:
+        client, upstream = config_service.preview(row['source_path'], request.headers.get('If-None-Match'))
+    except (OSError, ValueError, http.client.HTTPException):
+        return jsonify(error='预览暂不可用，请稍后重试'), 503
+    status, mime = upstream.status, upstream.getheader('Content-Type')
+    if status == 304:
+        etag = upstream.getheader('ETag')
+        client.close()
+        response = app.response_class(status=304)
+        response.headers['ETag'] = etag
+        response.headers['Cache-Control'] = 'private, max-age=300'
+        return response
+    if status != 200 or mime not in ('image/jpeg', 'image/png', 'image/gif', 'image/webp', 'image/heic', 'image/avif'):
+        client.close()
+        messages = {404: '源照片不存在或无法读取', 415: '该文件暂不支持图片预览或文件过大', 503: '预览繁忙，请稍后重试'}
+        return jsonify(error=messages.get(status, '图片预览不可用')), status if status in messages else 503
+    def blocks():
+        try:
+            while block := upstream.read(65536):
+                yield block
+        finally:
+            client.close()
+    response = app.response_class(blocks(), mimetype=mime, direct_passthrough=True)
+    response.call_on_close(client.close)
+    response.headers['Content-Length'] = upstream.getheader('Content-Length')
+    response.headers['ETag'] = upstream.getheader('ETag')
+    response.headers['Cache-Control'] = 'private, max-age=300'
+    return response
+
 
 @app.route('/api/files/<int:file_id>')
 @cached_response(3)

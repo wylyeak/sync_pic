@@ -179,12 +179,90 @@ async function list(view,{background=false}={}){
  finally{if(version===state.requestVersion){table.removeAttribute('aria-busy');table.classList.remove('is-loading');state.listPending=null;}}
 }
 
-function openDrawer(){state.drawerVersion++;state.drawerOpener=document.activeElement;$('drawer-overlay').hidden=false;$('drawer').hidden=false;$('drawer-content').innerHTML='<div class="loading-state">正在读取详情…</div>';document.body.style.overflow='hidden';$('close-drawer').focus();return state.drawerVersion;}
-function closeDrawer(){state.drawerVersion++;$('drawer-overlay').hidden=true;$('drawer').hidden=true;document.body.style.overflow='';state.drawerOpener?.focus();}
+let hoverTimer=null,hoverController=null,hoverAnchor=null,hoverUrl=null;
+function hidePhotoPreview(){
+ clearTimeout(hoverTimer);hoverController?.abort();hoverController=null;
+ hoverAnchor?.removeAttribute('aria-describedby');hoverAnchor=null;
+ $('photo-hover').hidden=true;
+ if(hoverUrl){URL.revokeObjectURL(hoverUrl);hoverUrl=null;}
+}
+function positionPhotoPreview(anchor){
+ const box=anchor.getBoundingClientRect(),popup=$('photo-hover');
+ const width=popup.offsetWidth,height=popup.offsetHeight;
+ popup.style.left=Math.max(12,Math.min(box.left,innerWidth-width-12))+'px';
+ popup.style.top=Math.max(12,box.bottom+height+12<innerHeight?box.bottom+8:box.top-height-8)+'px';
+}
+const photoCache=new Map();let photoDecodeQueue=Promise.resolve();
+async function photoBlob(id,signal){
+ const cached=photoCache.get(id);
+ if(cached&&Date.now()-cached.time<300000)return cached.blob;
+ const response=await fetch('/api/files/'+Number(id)+'/preview',{signal});
+ if(!response.ok){const data=await response.json();throw new Error(data.error||'图片预览不可用');}
+ const original=await response.blob();
+ signal.throwIfAborted();
+ const decode=async()=>{
+  signal.throwIfAborted();let bitmap;
+  try{bitmap=await createImageBitmap(original);}
+  catch(error){
+   if(original.type!=='image/heic')throw new Error('浏览器无法解码这张图片');
+   signal.throwIfAborted();
+   const {heicTo}=await import('/static/vendor/heic-to-1.6.7.js?v=1.6.7');
+   signal.throwIfAborted();bitmap=await heicTo({blob:original,type:'bitmap'});
+  }
+  try{
+   signal.throwIfAborted();
+   const scale=Math.min(1,640/Math.max(bitmap.width,bitmap.height));
+   const canvas=document.createElement('canvas');canvas.width=Math.max(1,Math.round(bitmap.width*scale));canvas.height=Math.max(1,Math.round(bitmap.height*scale));
+   canvas.getContext('2d').drawImage(bitmap,0,0,canvas.width,canvas.height);
+   const blob=await new Promise(resolve=>canvas.toBlob(resolve,'image/jpeg',.8));
+   canvas.width=canvas.height=1;if(!blob)throw new Error('浏览器无法生成预览');
+   signal.throwIfAborted();
+   photoCache.set(id,{blob,time:Date.now()});
+   while(photoCache.size>32)photoCache.delete(photoCache.keys().next().value);
+   return blob;
+  }finally{bitmap.close();}
+ };
+ const task=photoDecodeQueue.then(decode);photoDecodeQueue=task.catch(()=>{});return task;
+}
+function showPhotoPreview(anchor){
+ if(hoverAnchor===anchor)return;
+ hidePhotoPreview();hoverAnchor=anchor;
+ hoverTimer=setTimeout(async()=>{
+  const controller=hoverController=new AbortController(),popup=$('photo-hover'),body=popup.querySelector('.photo-preview-body');
+  anchor.setAttribute('aria-describedby','photo-hover');
+  popup.querySelector('.photo-preview-caption').textContent=anchor.textContent;
+  body.textContent='正在加载预览…';popup.hidden=false;positionPhotoPreview(anchor);
+  try{
+   const blob=await photoBlob(anchor.dataset.file,controller.signal);
+   if(controller.signal.aborted||hoverAnchor!==anchor)return;
+   hoverUrl=URL.createObjectURL(blob);const image=new Image();image.alt=anchor.textContent;
+   image.onload=()=>{if(hoverAnchor===anchor)positionPhotoPreview(anchor);};
+   image.src=hoverUrl;body.replaceChildren(image);
+  }catch(error){if(error.name!=='AbortError'&&hoverAnchor===anchor){body.textContent=error.message;positionPhotoPreview(anchor);}}
+ },350);
+}
+function loadDetailPreview(id,version){
+ const controller=state.detailPreviewController=new AbortController(),box=$('detail-photo');
+ photoBlob(id,controller.signal).then(blob=>{
+  if(controller.signal.aborted||state.drawerVersion!==version)return;
+  const url=URL.createObjectURL(blob),image=new Image();image.alt='照片预览';
+  image.onload=image.onerror=()=>URL.revokeObjectURL(url);image.src=url;box.replaceChildren(image);
+ }).catch(error=>{if(error.name!=='AbortError'&&state.drawerVersion===version)box.textContent=error.message;});
+}
+document.addEventListener('pointerover',event=>{if(event.pointerType==='touch')return;const anchor=event.target.closest('.file-link');if(anchor)showPhotoPreview(anchor);});
+document.addEventListener('pointerout',event=>{if(hoverAnchor&&!hoverAnchor.contains(event.relatedTarget))hidePhotoPreview();});
+document.addEventListener('focusin',event=>{const anchor=event.target.closest('.file-link');if(anchor&&matchMedia('(hover:hover)').matches)showPhotoPreview(anchor);});
+document.addEventListener('focusout',event=>{if(event.target===hoverAnchor)hidePhotoPreview();});
+document.addEventListener('scroll',hidePhotoPreview,true);
+window.addEventListener('resize',hidePhotoPreview);
+document.addEventListener('keydown',event=>{if(event.key==='Escape')hidePhotoPreview();});
+
+function openDrawer(){hidePhotoPreview();state.detailPreviewController?.abort();state.drawerVersion++;state.drawerOpener=document.activeElement;$('drawer-overlay').hidden=false;$('drawer').hidden=false;$('drawer-content').innerHTML='<div class="loading-state">正在读取详情…</div>';document.body.style.overflow='hidden';$('close-drawer').focus();return state.drawerVersion;}
+function closeDrawer(){state.detailPreviewController?.abort();state.drawerVersion++;$('drawer-overlay').hidden=true;$('drawer').hidden=true;document.body.style.overflow='';state.drawerOpener?.focus();}
 async function batchDetail(id){const version=openDrawer();try{const row=await api('/api/batches/'+encodeURIComponent(id));if($('drawer').hidden||version!==state.drawerVersion)return;const durations={...row.phase_seconds};if(row.phase!=='complete'&&row.phase_started_at)durations[row.phase]=(durations[row.phase]||0)+Math.max(0,Date.now()/1000-row.phase_started_at);const maximum=Math.max(1,...Object.values(durations).map(Number));$('drawer-content').innerHTML=`<h2 id="drawer-title">批次详情 ${phaseBadge(row)}</h2><div class="mono">${esc(row.id)}</div><div class="detail-grid">${detailItem('开始时间',date(row.started_at))}${detailItem('结束时间',row.ended_at?date(row.ended_at):'正在进行')}${detailItem('本批文件',num(row.file_count)+' 个')}${detailItem('整体备份确认',row.backed_up==null?'未记录':num(row.backed_up)+' 个')}${detailItem('手动删除成功',row.summary?num(row.summary.manual_deleted)+' 个':'待批次结束统计')}${detailItem('文件变化待核查',num(row.deferred)+' 个')}${detailItem('观察次数',num(row.observations)+' / 3')}${detailItem('总耗时',row.started_at?elapsed((row.ended_at||Date.now()/1000)-row.started_at):'未记录')}</div><div class="detail-note">备份数按相册整体完成状态确认，不代表本轮新增上传量。${row.timing_partial?' 此批在统计升级前已开始，历史阶段耗时没有补造。':''}</div><h3>各阶段耗时 <span class="subtle">含等待与重启间隔</span></h3>${Object.entries(phaseLabels).filter(([p])=>p!=='complete').map(([p,label])=>`<div class="phase-time-row"><span>${label}</span><div class="phase-time-track"><div class="phase-time-bar" style="width:${Math.max(0,Math.min(100,Number(durations[p]||0)/maximum*100))}%"></div></div><span>${elapsed(durations[p]||0)}</span></div>`).join('')}<button class="primary-button" data-batch-files="${esc(row.id)}">查看本批文件 ↗</button>${row.summary?.body?`<h3>批次完成报告</h3><div class="detail-note">${esc(row.summary.body)}</div>`:''}`;}catch(error){if(version===state.drawerVersion)$('drawer-content').innerHTML=empty(error.message);}}
-async function fileDetail(id){const version=openDrawer();try{const row=await api('/api/files/'+Number(id));if($('drawer').hidden||version!==state.drawerVersion)return;$('drawer-content').innerHTML=`<h2 id="drawer-title">${esc(row.source_path.split('/').pop())}</h2><div class="mono">${esc(row.source_path)}</div><div class="detail-grid">${detailItem('文件大小',bytes(row.size_bytes))}${detailItem('目标状态',statusLabel[row.status]||row.status)}${detailItem('备份确认方式',backupLabel[row.backup_state]||row.backup_state)}${detailItem('源库存状态',row.source_present?'最近扫描存在':'最近扫描未发现')}${detailItem('拍摄时间',captureDate(row))}${detailItem('源修改时间',row.mtime_ns?date(Number(row.mtime_ns)/1e9):'未记录')}${detailItem('建立链接时间',date(row.linked_at))}${detailItem('检测删除时间',date(row.deleted_at))}${detailItem('删除来源',originLabel[row.deletion_origin]||row.deletion_origin)}</div>${row.last_error?`<div class="detail-note">${esc(row.last_error)}</div>`:''}${row.batch_id?`<button class="text-link" data-batch="${esc(row.batch_id)}">所属批次 ${esc(row.batch_id.slice(0,8).toUpperCase())} ↗</button>`:''}<h3>相关删除审计</h3>${row.audits.length?row.audits.map(a=>`<div class="event"><span class="event-dot ${a.state==='deleted'?'green':''}"></span><div class="event-text">${esc(originLabel[a.origin]||a.origin)} · ${esc(statusLabel[a.state]||a.state)}<br>${esc(reasonLabel[a.reason]||(String(a.reason||'').startsWith('remote_tombstone:')?'Pixel 端删除证据':a.reason)||'无附加说明')}${a.error_message?'<br>'+esc(a.error_message):''}<span class="event-time">#${Number(a.id)} · ${esc(date(a.created_at))}</span></div></div>`).join(''):empty('此文件尚无删除审计')}`;}catch(error){if(version===state.drawerVersion)$('drawer-content').innerHTML=empty(error.message);}}
+async function fileDetail(id){const version=openDrawer();try{const row=await api('/api/files/'+Number(id));if($('drawer').hidden||version!==state.drawerVersion)return;$('drawer-content').innerHTML=`<h2 id="drawer-title">${esc(row.source_path.split('/').pop())}</h2><div class="mono">${esc(row.source_path)}</div><div id="detail-photo" class="detail-photo" role="status">正在加载预览…</div><div class="detail-grid">${detailItem('文件大小',bytes(row.size_bytes))}${detailItem('目标状态',statusLabel[row.status]||row.status)}${detailItem('备份确认方式',backupLabel[row.backup_state]||row.backup_state)}${detailItem('源库存状态',row.source_present?'最近扫描存在':'最近扫描未发现')}${detailItem('拍摄时间',captureDate(row))}${detailItem('源修改时间',row.mtime_ns?date(Number(row.mtime_ns)/1e9):'未记录')}${detailItem('建立链接时间',date(row.linked_at))}${detailItem('检测删除时间',date(row.deleted_at))}${detailItem('删除来源',originLabel[row.deletion_origin]||row.deletion_origin)}</div>${row.last_error?`<div class="detail-note">${esc(row.last_error)}</div>`:''}${row.batch_id?`<button class="text-link" data-batch="${esc(row.batch_id)}">所属批次 ${esc(row.batch_id.slice(0,8).toUpperCase())} ↗</button>`:''}<h3>相关删除审计</h3>${row.audits.length?row.audits.map(a=>`<div class="event"><span class="event-dot ${a.state==='deleted'?'green':''}"></span><div class="event-text">${esc(originLabel[a.origin]||a.origin)} · ${esc(statusLabel[a.state]||a.state)}<br>${esc(reasonLabel[a.reason]||(String(a.reason||'').startsWith('remote_tombstone:')?'Pixel 端删除证据':a.reason)||'无附加说明')}${a.error_message?'<br>'+esc(a.error_message):''}<span class="event-time">#${Number(a.id)} · ${esc(date(a.created_at))}</span></div></div>`).join(''):empty('此文件尚无删除审计')}`;loadDetailPreview(id,version);}catch(error){if(version===state.drawerVersion)$('drawer-content').innerHTML=empty(error.message);}}
 const viewCopy={settings:['运行配置','按你的节奏，安排备份。','调整同步参数，保存后自动应用并持久保留。'],overview:['同步总览','每一份回忆，都妥善保存。','从 NAS 到 Pixel，再到云端，查看照片同步与备份的每一步。'],batches:['批次历史','回看每一批，保存每一步。','从开始到结束，查看备份结果与各阶段累计耗时。'],files:['文件明细','每一个文件，都有迹可循。','从待处理到备份完成，检索照片路径与库存状态。'],audits:['删除审计','清理目标空间，保留源照片。','核对删除来源、执行结果，以及每次清理留下的审计记录。']};
-async function changeView(){
+async function changeView(){hidePhotoPreview();
  const name=location.hash.slice(1),view=viewCopy[name]?name:'overview';state.view=view;
  Object.keys(viewCopy).forEach(v=>$(v).hidden=v!==view);
  document.querySelectorAll('[data-view]').forEach(a=>a.classList.toggle('active',a.dataset.view===view));

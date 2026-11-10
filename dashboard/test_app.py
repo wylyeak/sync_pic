@@ -67,6 +67,37 @@ class DashboardTests(unittest.TestCase):
         self.assertNotIn(term, query)
         self.assertIn(term, params)
         self.assertEqual(params[-2:], [100, 999900])
+    def test_preview_streams_original_without_gzip_or_private_error_leaks(self):
+        import io
+        cursor = Mock()
+        cursor.fetchone.return_value = {'source_path': 'photo.jpg'}
+        @contextmanager
+        def database():
+            yield cursor
+        client = Mock()
+        upstream = Mock(status=200)
+        raw = b'original-jpeg' * 1000
+        upstream.read.side_effect = io.BytesIO(raw).read
+        upstream.getheader.side_effect = {'Content-Type': 'image/jpeg', 'Content-Length': str(len(raw)), 'ETag': '"test"'}.get
+        with patch('app.db', database), patch('app.config_service.preview', return_value=(client, upstream)) as preview:
+            response = self.client.get('/api/files/7/preview?path=/etc/passwd', headers={'Accept-Encoding': 'gzip'})
+            self.assertEqual(response.data, raw)
+            response.close()
+        preview.assert_called_once_with('photo.jpg', None)
+        self.assertEqual(response.mimetype, 'image/jpeg')
+        self.assertNotIn('Content-Encoding', response.headers)
+        self.assertIn('private', response.headers['Cache-Control'])
+        client.close.assert_called()
+        for status in (404, 415, 503):
+            upstream = Mock(status=status)
+            with patch('app.db', database), patch('app.config_service.preview', return_value=(client, upstream)):
+                response = self.client.get('/api/files/7/preview')
+            self.assertEqual(response.status_code, status)
+        cursor.fetchone.return_value = None
+        with patch('app.db', database), patch('app.config_service.preview') as preview:
+            self.assertEqual(self.client.get('/api/files/8/preview').status_code, 404)
+        preview.assert_not_called()
+
     def test_invalid_filters_and_ids(self):
         for url in ('/api/files?status=drop', '/api/files?batch=../../config.toml', '/api/batches/not-valid', '/api/audits?origin=root'):
             self.assertEqual(self.client.get(url).status_code, 400)

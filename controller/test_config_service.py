@@ -31,3 +31,24 @@ class ConfigServiceTests(unittest.TestCase):
                     self.assertEqual(config_service.call('PUT', {'values': {'mysql': {'password': 'change'}}, 'revision': saved['revision']})[1], 400)
                     self.assertEqual(config_service.call('PUT', {'values': {'scan': {'interval': True}}, 'revision': saved['revision']})[1], 400)
                 self.assertFalse(config_service.socket_path().exists())
+
+    def test_preview_socket_streams_original_and_supports_etag(self):
+        from PIL import Image
+        with tempfile.TemporaryDirectory() as root:
+            path = Path(root, 'photo.jpg')
+            Image.new('RGB', (12, 8)).save(path)
+            controller = SimpleNamespace(source=root)
+            with patch.dict(os.environ, PICSYNC_CONFIG_SOCKET=str(Path(root, 'config.sock'))):
+                with config_service.serve(controller):
+                    client, response = config_service.preview('photo.jpg')
+                    self.assertEqual(response.status, 200)
+                    self.assertEqual(response.read(), path.read_bytes())
+                    etag = response.getheader('ETag')
+                    client.close()
+                    client, response = config_service.preview('photo.jpg', etag)
+                    self.assertEqual(response.status, 304)
+                    self.assertEqual(response.read(), b'')
+                    client.close()
+                    client, response = config_service.preview('../photo.jpg')
+                    self.assertEqual(response.status, 400)
+                    client.close()

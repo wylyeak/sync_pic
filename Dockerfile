@@ -2,6 +2,9 @@ FROM python:3.12-slim AS base
 WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
+ARG BUILD_VERSION=development
+ARG BUILD_REVISION=unknown
+RUN python -c 'import json,sys; json.dump(dict(version=sys.argv[1], revision=sys.argv[2], timezone="Asia/Shanghai"), open("/app/build-info.json", "w"))' "$BUILD_VERSION" "$BUILD_REVISION"
 FROM base AS controller
 USER root
 RUN apt-get update && apt-get install -y --no-install-recommends adb \

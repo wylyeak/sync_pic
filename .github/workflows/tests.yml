@@ -36,6 +36,11 @@ jobs:
         target: [controller, dashboard]
     steps:
       - uses: actions/checkout@v4
+      - name: Release identity from commit time (Asia/Shanghai)
+        id: release
+        run: |
+          echo "version=$(TZ=Asia/Shanghai date -d "@$(git show -s --format=%ct HEAD)" +%Y%m%d%H%M%S)" >> "$GITHUB_OUTPUT"
+          echo "revision=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
       - name: Check publishing credentials
         if: github.event_name != 'pull_request'
         env:
@@ -76,6 +81,9 @@ jobs:
           context: .
           file: ./Dockerfile
           target: ${{ matrix.target }}
+          build-args: |
+            BUILD_VERSION=${{ steps.release.outputs.version }}
+            BUILD_REVISION=${{ steps.release.outputs.revision }}
           platforms: ${{ github.event_name == 'pull_request' && 'linux/amd64' || vars.DOCKER_PLATFORMS || 'linux/amd64,linux/arm64' }}
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}

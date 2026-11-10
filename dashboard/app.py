@@ -22,6 +22,16 @@ from performance import TTLCache, ReadPool
 ROOT = Path(__file__).resolve().parent
 app = Flask(__name__, static_folder='static')
 app.json.ensure_ascii = False
+
+
+@lru_cache(maxsize=1)
+def build_info():
+    # Baked into both release images, independent of startup time and private config.
+    path = ROOT / 'build-info.json'
+    if not path.exists():
+        return dict(version='development', revision='unknown', timezone='Asia/Shanghai')
+    return json.loads(path.read_text())
+
 PHASES = {'mapping': '建立硬链接', 'sync': '等待同步', 'backup': '等待相册备份',
           'release': '相册释放', 'release_uncertain': '释放结果确认', 'deletions': '等待删除同步',
           'observe': '残留观察', 'cleanup': '手动补充清理', 'final_sync': '最终删除同步', 'complete': '已完成'}
@@ -211,6 +221,11 @@ def static_version(filename):
 @app.route('/')
 def index():
     html = (Path(app.static_folder) / 'index.html').read_text()
+    info = build_info()
+    for token, value in [('__BUILD_VERSION__', info['version']),
+                         ('__BUILD_REVISION__', info['revision']),
+                         ('__BUILD_SHORT_REVISION__', info['revision'][:7])]:
+        html = html.replace(token, html_escape.escape(value, quote=True))
     for key, token in [('pixel_url', '__PIXEL_URL__'), ('syncthing_url', '__SYNCTHING_URL__')]:
         url = os.environ.get('PICSYNC_' + key.upper(), settings().get('links', {}).get(key, ''))
         if url and (urlsplit(url).scheme not in ('http', 'https') or not urlsplit(url).netloc):
@@ -224,6 +239,10 @@ def index():
 @app.route('/health')
 def health():
     return jsonify(ok=True)
+
+@app.route('/api/version')
+def version():
+    return jsonify(build_info())
 
 @app.route('/api/overview')
 def overview():

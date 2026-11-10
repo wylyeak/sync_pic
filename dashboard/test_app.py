@@ -21,6 +21,31 @@ class DashboardTests(unittest.TestCase):
             response = self.client.get('/api/overview')
         self.assertEqual(response.status_code, 503)
         self.assertNotIn('private-password', response.get_data(as_text=True))
+
+    def test_release_identity_visible_without_database_and_not_cached(self):
+        info = dict(version='20261110171230', revision='a'*40, timezone='Asia/Shanghai')
+        with patch('app.build_info', return_value=info), patch('app.db', side_effect=AssertionError('must not query database')):
+            response = self.client.get('/')
+            html = response.get_data(as_text=True)
+            self.assertIn('版本 <span>20261110171230</span>', html)
+            self.assertIn(' · aaaaaaa</span>', html)
+            self.assertNotIn('v1.0', html)
+            self.assertNotIn('__BUILD_', html)
+            self.assertEqual(response.headers['Cache-Control'], 'no-cache')
+            for _ in range(2):
+                response = self.client.get('/api/version')
+                self.assertEqual(response.get_json(), info)
+                self.assertEqual(response.headers['Cache-Control'], 'no-store')
+
+    def test_build_info_uses_baked_file_or_explicit_development(self):
+        with tempfile.TemporaryDirectory() as folder, patch('app.ROOT', Path(folder)):
+            web.build_info.cache_clear()
+            self.addCleanup(web.build_info.cache_clear)
+            self.assertEqual(web.build_info()['version'], 'development')
+            info = dict(version='20261110171230', revision='b'*40, timezone='Asia/Shanghai')
+            Path(folder, 'build-info.json').write_text(json.dumps(info))
+            web.build_info.cache_clear()
+            self.assertEqual(web.build_info(), info)
     def test_runtime_marks_old_controller_heartbeat_stale(self):
         with tempfile.TemporaryDirectory() as folder:
             path = Path(folder, 'runtime.json')

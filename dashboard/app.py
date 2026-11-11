@@ -43,6 +43,12 @@ ROUND_SELECT = """SELECT b.id,b.phase,UNIX_TIMESTAMP(b.updated_at) updated_at,
     UNIX_TIMESTAMP(b.phase_started_at) phase_started_at,UNIX_TIMESTAMP(b.next_check) next_check,
     b.observations,b.file_count,b.planned_files,b.backed_up,b.deferred,b.mapping_skipped,
     b.timing_partial,b.release_action,b.summary,
+    (SELECT COUNT(*) FROM controller_file_batches m JOIN files f
+      ON f.source_key=m.source_key AND BINARY f.source_path=BINARY m.source_path
+      WHERE m.batch_id=b.id AND f.status='deleted' AND f.deletion_origin='manual') manual_deleted,
+    (SELECT COUNT(*) FROM controller_file_batches m JOIN files f
+      ON f.source_key=m.source_key AND BINARY f.source_path=BINARY m.source_path
+      WHERE m.batch_id=b.id AND f.status='deleted' AND f.deletion_origin='syncthing') syncthing_deleted,
     (SELECT JSON_OBJECTAGG(p.phase,p.seconds) FROM batch_phase_stats p WHERE p.batch_id=b.id) phase_seconds
     FROM backup_batches b"""
 JSON_FIELDS = ('started_at', 'ended_at', 'backed_up', 'phase_seconds', 'phase_started_at',
@@ -273,6 +279,20 @@ def runtime_settings():
         return jsonify(data), status
     except (OSError, ValueError):
         return jsonify(error='控制器配置服务暂不可用，请稍后重试'), 503
+
+@app.route('/api/scan', methods=['POST'])
+def start_scan():
+    origin = request.headers.get('Origin')
+    if (origin and (urlsplit(origin).scheme not in ('http', 'https') or urlsplit(origin).netloc != request.host)) or request.headers.get('X-PicSync-Settings') != '1':
+        return jsonify(error='扫描必须从本站页面触发'), 403
+    run = runtime()
+    if not run.get('available') or run.get('controller_stale'):
+        return jsonify(error='控制器离线，暂不能开始扫描'), 503
+    try:
+        data, status = config_service.call('POST', path='/scan')
+        return jsonify(data), status
+    except (OSError, ValueError):
+        return jsonify(error='控制器暂不可用，请稍后重试'), 503
 
 @app.route('/api/overview')
 def overview():

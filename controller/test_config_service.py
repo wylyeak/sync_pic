@@ -8,6 +8,16 @@ import config_service
 import live_config
 
 class ConfigServiceTests(unittest.TestCase):
+    def test_scan_request_uses_existing_socket(self):
+        from unittest.mock import Mock
+        controller = SimpleNamespace(request_scan=Mock(return_value=({'accepted': True}, 202)))
+        with tempfile.TemporaryDirectory() as root, patch.dict(os.environ, PICSYNC_CONFIG_SOCKET=str(Path(root, 'config.sock'))):
+            with config_service.serve(controller):
+                data, status = config_service.call('POST', path='/scan')
+                self.assertEqual(status, 202)
+                self.assertTrue(data['accepted'])
+                controller.request_scan.assert_called_once_with()
+
     def test_socket_api_edits_original_and_never_returns_private_content(self):
         with tempfile.TemporaryDirectory() as root:
             path = Path(root, 'config.toml')

@@ -26,10 +26,10 @@ def connection():
     return Connection('localhost', timeout=15)
 
 
-def call(method, body=None):
+def call(method, body=None, path='/settings'):
     client = connection()
     try:
-        client.request(method, '/settings', body=json.dumps(body) if body is not None else None,
+        client.request(method, path, body=json.dumps(body) if body is not None else None,
                            headers={'Content-Type': 'application/json'})
         response = client.getresponse()
         data = json.loads(response.read(MAX_BODY + 1))
@@ -91,6 +91,9 @@ def serve(controller):
             self.handle_settings()
 
         def do_POST(self):
+            if self.path == '/scan' and hasattr(controller, 'request_scan'):
+                data, status = controller.request_scan()
+                return self.respond(data, status)
             if self.path != '/preview' or not hasattr(controller, 'source'):
                 return self.respond({'error': '预览不可用'}, 404)
             if not preview_slots.acquire(blocking=False):

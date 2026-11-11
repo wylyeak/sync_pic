@@ -8,6 +8,9 @@ from file_sync import Controller
 class ScannerAlertThresholdTests(unittest.TestCase):
     def scan(self, steps, threshold=2):
         c = Controller.__new__(Controller)
+        c.scan_lock = __import__("threading").Lock()
+        c.scan_requested = __import__("threading").Event()
+        c.scan_running = False
         c.c = load()
         c.c['bark']['error_threshold'] = threshold
         c.source, c.target = '/source', '/target'

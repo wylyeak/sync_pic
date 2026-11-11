@@ -83,6 +83,9 @@ class ControllerTests(unittest.TestCase):
         from unittest.mock import Mock
         from file_sync import Controller
         value = Controller.__new__(Controller)
+        value.scan_lock = __import__("threading").Lock()
+        value.scan_requested = __import__("threading").Event()
+        value.scan_running = False
         value.mapping_allowed = Mock(return_value=True)
         value.c = load()
         value.events = __import__('queue').SimpleQueue()

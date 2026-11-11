@@ -124,6 +124,9 @@ class Controller:
         config = live_config.merge(config, values)
         self.c, self.stop = config, stop
         self.events = queue.SimpleQueue()
+        self.scan_lock = threading.Lock()
+        self.scan_requested = threading.Event()
+        self.scan_running = False
         self.source, self.target = config['directories']['source'], config['directories']['target']
         self.connection = {k: config['mysql'][k] for k in ('host', 'port', 'user')}
         self.connection['password'] = config['mysql']['password']
@@ -167,11 +170,23 @@ class Controller:
                          values=live_config.public(self.c), error='配置未应用：' + type(exc).__name__)
             log.warning('Runtime settings reload rejected: %s', type(exc).__name__)
 
+    def request_scan(self):
+        with self.scan_lock:
+            if self.scan_running or self.scan_requested.is_set():
+                return dict(error='扫描正在进行或已请求，请稍候'), 409
+            self.scan_requested.set()
+        return dict(accepted=True), 202
+
     def wait_scan(self):
         started = time.monotonic()
+        deadline = None
         while not self.stop.is_set():
             remaining = self.c['scan']['interval'] - (time.monotonic() - started)
-            if remaining <= 0:
+            expected = started + self.c['scan']['interval']
+            if deadline != expected:
+                deadline = expected
+                self.publish('scan', next_started_at=time.time() + max(0, remaining))
+            if remaining <= 0 or self.scan_requested.is_set():
                 return False
             if self.stop.wait(min(1, remaining)):
                 return True
@@ -394,7 +409,11 @@ class Controller:
         failures = FailureStreak(self.c['bark']['error_threshold'])
         while not self.stop.is_set():
             failures.threshold = self.c['bark']['error_threshold']
+            with self.scan_lock:
+                self.scan_requested.clear()
+                self.scan_running = True
             try:
+                self.publish('scan', state='scanning', started_at=time.time(), finished_at=None, next_started_at=None, stats={}, error=None)
                 db = db or self.connect()
                 ensure_storage(self.source)
                 os.listdir(self.source)
@@ -423,6 +442,9 @@ class Controller:
                     with suppress(Exception):
                         db.close()
                     db = None
+            finally:
+                with self.scan_lock:
+                    self.scan_running = False
             if self.wait_scan():
                 break
         if db:

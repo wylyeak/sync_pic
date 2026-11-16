@@ -642,6 +642,54 @@ class InventoryTest(unittest.TestCase):
         self.assertEqual(row['deletion_reason'], 'photos_retained')
         self.assertEqual(json.loads(row['backup_evidence'])['retention']['run_id'], 'test-run')
 
+    def selected_fixture(self):
+        from batch_store import BatchStore
+        path, dest, _, fp = self.confirmed_fixture()
+        snapshots = {'confirmed.jpg': list(fp)}
+        store = BatchStore(self.db)
+        store.migrate()
+        batch = dict(id=uuid.uuid4().hex, phase='manual_delete', members=snapshots,
+            release={'action':'nothing_to_free'}, manual_review_revision='review',
+            manual_delete_selection=snapshots, manual_delete_requested_at=1)
+        store.save(batch)
+        evidence = dict(state='user_selected_delete', user_confirmed=True, run_id=batch['id'],
+            review_revision='review', sync_ready=True, sync_token_before=[1], sync_token_after=[1], checked_at=now())
+        return path, dest, snapshots, evidence
+
+    def test_user_selected_delete_keeps_original_and_never_claims_backup(self):
+        path, dest, snapshots, evidence = self.selected_fixture()
+        source_before = os.stat(path)
+        result = self.db.delete_user_selected_targets(self.source, self.target, snapshots, evidence)
+        self.assertEqual(result[0]['action'], 'deleted')
+        self.assertFalse(os.path.exists(dest))
+        self.assertEqual(__import__('pathlib').Path(path).read_bytes(), b'abc')
+        self.assertEqual(os.stat(path).st_ino, source_before.st_ino)
+        row = self.row(path)
+        self.assertEqual((row['status'], row['backup_state'], row['deletion_reason']),
+                         ('deleted', 'not_confirmed', 'user_selected_skip'))
+        self.db.scan_target(self.source, self.target, os.walk)
+        self.scan()
+        self.assertEqual(self.row(path)['status'], 'deleted')
+        self.assertFalse(self.db.pending(self.source, unassigned_only=True))
+        event = self.db.query('SELECT state,reason,evidence FROM deletion_events')[0]
+        self.assertEqual((event['state'], event['reason']), ('deleted','user_selected_skip'))
+        self.assertNotIn('backup_complete', json.loads(event['evidence']))
+
+    def test_selected_delete_refuses_stale_unselected_and_changed_original(self):
+        path, dest, snapshots, evidence = self.selected_fixture()
+        with self.assertRaises(ValueError):
+            self.db.delete_user_selected_targets(self.source, self.target, snapshots, dict(evidence, review_revision='stale'))
+        with self.assertRaises(ValueError):
+            self.db.delete_user_selected_targets(self.source, self.target, {'other.jpg': list(snapshots.values())[0]}, evidence)
+        os.rename(path, path+'.kept')
+        self.create('confirmed.jpg', b'new original')
+        result = self.db.delete_user_selected_targets(self.source, self.target, snapshots, evidence)
+        self.assertEqual(result[0]['action'],'error')
+        self.assertTrue(os.path.exists(dest))
+        self.assertEqual(self.row(path)['status'],'linked')
+        self.assertEqual(self.row(path)['backup_state'],'unknown')
+        self.assertEqual(__import__('pathlib').Path(path+'.kept').read_bytes(),b'abc')
+
     def test_relaxed_batch_keeps_sources_and_labels_aggregate_trust(self):
         path, dest, _, fingerprint = self.confirmed_fixture()
         proof = {'state': 'aggregate_confirmed', 'run_id': uuid.uuid4().hex,

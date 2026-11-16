@@ -27,6 +27,16 @@ class ConfigServiceTests(unittest.TestCase):
                 controller.request_release.assert_called_once_with('test')
                 self.assertEqual(config_service.call('POST', {'batch_id': []}, path='/release')[1], 400)
 
+    def test_selected_delete_socket_binds_revision_and_paths(self):
+        from unittest.mock import Mock
+        controller = SimpleNamespace(request_selected_delete=Mock(return_value=({'accepted': True},202)))
+        with tempfile.TemporaryDirectory() as root, patch.dict(os.environ,PICSYNC_CONFIG_SOCKET=str(Path(root,'config.sock'))):
+            with config_service.serve(controller):
+                payload={'batch_id':'a'*32,'revision':'review','files':['large.mp4']}
+                self.assertEqual(config_service.call('POST',payload,path='/delete-selected')[1],202)
+                controller.request_selected_delete.assert_called_once_with('a'*32,'review',['large.mp4'])
+                self.assertEqual(config_service.call('POST',dict(payload,revision=[]),path='/delete-selected')[1],400)
+
     def test_socket_api_edits_original_and_never_returns_private_content(self):
         with tempfile.TemporaryDirectory() as root:
             path = Path(root, 'config.toml')

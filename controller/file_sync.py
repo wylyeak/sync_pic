@@ -127,6 +127,7 @@ class Controller:
         self.scan_lock = threading.Lock()
         self.scan_requested = threading.Event()
         self.release_requests = queue.Queue(maxsize=1)
+        self.delete_requests = queue.Queue(maxsize=1)
         self.scan_running = False
         self.source, self.target = config['directories']['source'], config['directories']['target']
         self.connection = {k: config['mysql'][k] for k in ('host', 'port', 'user')}
@@ -187,6 +188,25 @@ class Controller:
         except queue.Full:
             return dict(error='释放请求已在等待处理'), 409
         return dict(accepted=True), 202
+
+    def request_selected_delete(self, batch_id, revision, files):
+        batch = self.round
+        if (not batch or batch['id'] != batch_id or batch['phase'] != 'manual_review'
+                or batch.get('manual_review_revision') != revision):
+            return dict(error='残留列表已变化，请刷新后重新选择'), 409
+        if (type(files) is not list or not 0 < len(files) <= 2000
+                or any(not isinstance(name, str) for name in files) or len(set(files)) != len(files)):
+            return dict(error='请选择 1–2000 个不同的文件'), 400
+        remaining = batch.get('manual_remaining', {})
+        if any(name not in remaining or remaining[name] != batch['members'].get(name)
+               or name in batch.get('deferred', []) for name in files):
+            return dict(error='选择包含已变化或非本批残留文件'), 409
+        selection = {name: remaining[name] for name in files}
+        try:
+            self.delete_requests.put_nowait((batch_id, revision, copy.deepcopy(selection)))
+        except queue.Full:
+            return dict(error='已有删除请求等待处理'), 409
+        return dict(accepted=True, selected=len(files)), 202
 
     def wait_scan(self):
         started = time.monotonic()
@@ -600,6 +620,20 @@ class Controller:
                     raise SyncthingUnavailable('同步尚未完成，请同步完成后重新请求释放')
                 self.round['manual_release_requested_at'] = time.time()
                 self.save('manual_release')
+        execute_selected_delete = False
+        deletions = getattr(self, 'delete_requests', None)
+        if deletions is not None and not deletions.empty():
+            batch_id, revision, selection = deletions.get_nowait()
+            if (batch_id != self.round['id'] or self.round['phase'] != 'manual_review'
+                    or self.round.get('manual_review_revision') != revision):
+                raise PhoneUnavailable('删除请求已过期，请刷新残留列表重新选择')
+            if not before['ready'] or before['token'] != self.round.get('manual_review_sync_token'):
+                self.save('manual_release_sync')
+                raise SyncthingUnavailable('同步状态已变化，请等待残留列表重新确认后再删除')
+            self.round['manual_delete_selection'] = selection
+            self.round['manual_delete_requested_at'] = time.time()
+            self.save('manual_delete')
+            execute_selected_delete = True
         phase = self.round['phase']
         if phase == 'mapping':
             return 1 if self.map_round() else min(60, self.c['monitor']['interval'])
@@ -633,8 +667,6 @@ class Controller:
         elif phase == 'manual_release_uncertain':
             raise PhoneUnavailable('手动释放结果待确认；请检查相册后在页面重新请求释放')
         elif phase == 'manual_release_sync':
-            # No aggregate backup proof and no fallback unlink in this path.
-            # Only Google Photos decides which safely backed-up items to free.
             current = self.batch_snapshot()
             after = self.sync_status()
             fresh = self.batch_snapshot()
@@ -642,10 +674,54 @@ class Controller:
             count = self.observation.sample(valid, [before['token'], current], time.time(), self.c['observation']['interval'])
             self.save()
             if count >= self.c['observation']['confirmations']:
-                self.round['manual_retained'] = fresh
-                self.round['deferred'] = sorted(set(self.round.get('deferred', [])) | set(fresh))
+                if not fresh:
+                    self.save('complete')
+                    self.flush_batch_reports()
+                else:
+                    self.round['manual_remaining'] = fresh
+                    self.round['manual_review_revision'] = uuid.uuid4().hex
+                    self.round['manual_review_sync_token'] = after['token']
+                    self.save('manual_review')
+        elif phase == 'manual_review':
+            current = self.batch_snapshot()
+            if not current:
                 self.save('complete')
                 self.flush_batch_reports()
+            elif (current != self.round.get('manual_remaining')
+                    or before['token'] != self.round.get('manual_review_sync_token')):
+                self.save('manual_release_sync')
+        elif phase == 'manual_delete':
+            if not execute_selected_delete:
+                # Interrupted deletion is never replayed. Reconcile intents,
+                # refresh the list and require a new user selection.
+                self.reconcile_intents()
+                self.save('manual_release_sync')
+            else:
+                current = self.batch_snapshot()
+                after = self.sync_status()
+                if not after['ready'] or before['token'] != after['token']:
+                    self.save('manual_release_sync')
+                    raise SyncthingUnavailable('删除前同步状态已变化，已取消本次删除')
+                selected = self.round['manual_delete_selection']
+                if any(current.get(name) != value or name in self.round.get('deferred', []) for name, value in selected.items()):
+                    self.save('manual_release_sync')
+                    raise PhoneUnavailable('所选文件已变化或已移除，请重新选择')
+                evidence = dict(state='user_selected_delete', user_confirmed=True, run_id=self.round['id'],
+                    review_revision=self.round['manual_review_revision'], checked_at=now(), sync_ready=True,
+                    sync_token_before=before['token'], sync_token_after=after['token'])
+                results = self.db.delete_user_selected_targets(self.source, self.target, selected, evidence)
+                self.round.setdefault('selected_cleanup_results', []).extend(results)
+                self.round.setdefault('user_skipped', {}).update({name: value for name, value in selected.items()
+                    if any(r['file'] == name and r['action'] == 'deleted' for r in results)})
+                self.save('manual_delete_sync')
+        elif phase == 'manual_delete_sync':
+            # The common ready gate includes remote tombstones. Stay here until
+            # the phone acknowledges deletions, then refresh any remaining list.
+            if not self.batch_snapshot():
+                self.save('complete')
+                self.flush_batch_reports()
+            else:
+                self.save('manual_release_sync')
         elif phase == 'sync':
             self.save('backup')
         elif phase == 'backup':

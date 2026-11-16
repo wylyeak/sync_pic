@@ -91,6 +91,19 @@ def serve(controller):
             self.handle_settings()
 
         def do_POST(self):
+            if self.path == '/delete-selected':
+                try:
+                    size = int(self.headers.get('Content-Length', '0'))
+                    if not 0 < size <= 1048576:
+                        raise ValueError()
+                    body = json.loads(self.rfile.read(size))
+                    if (type(body) is not dict or set(body) != {'batch_id', 'revision', 'files'}
+                            or not isinstance(body['batch_id'], str) or not isinstance(body['revision'], str)):
+                        raise ValueError()
+                except (ValueError, TypeError):
+                    return self.respond({'error': '请求格式无效'}, 400)
+                data, status = controller.request_selected_delete(body['batch_id'], body['revision'], body['files'])
+                return self.respond(data, status)
             if self.path == '/release':
                 try:
                     size = int(self.headers.get('Content-Length', '0'))

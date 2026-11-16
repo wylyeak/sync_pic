@@ -660,6 +660,38 @@ class Inventory:
                 or evidence.get('sync_ready') is not True
                 or evidence.get('sync_token_before') != evidence.get('sync_token_after')):
             raise ValueError('Relaxed cleanup requires all three aggregate gates and unchanged sync state')
+        return self._delete_snapshot_targets(source, target, snapshots, evidence, progress, guard,
+                                             'relaxed_no_free_space', 'aggregate_confirmed')
+
+    def delete_user_selected_targets(self, source, target, snapshots, evidence):
+        """User-authorized target disposal; this is explicitly not backup proof."""
+        if (evidence.get('state') != 'user_selected_delete' or evidence.get('user_confirmed') is not True
+                or evidence.get('sync_ready') is not True or evidence.get('sync_token_before') is None
+                or evidence.get('sync_token_before') != evidence.get('sync_token_after')):
+            raise ValueError('Selected cleanup requires explicit authorization and stable sync')
+        rows = self.query("SELECT phase,extra FROM backup_batches WHERE id=%s", (evidence.get('run_id'),))
+        if len(rows) != 1 or rows[0]['phase'] != 'manual_delete':
+            raise ValueError('Selected cleanup requires the active deletion phase')
+        extra = json.loads(rows[0]['extra']) if isinstance(rows[0]['extra'], str) else rows[0]['extra']
+        if (not extra.get('manual_delete_requested_at')
+                or extra.get('manual_review_revision') != evidence.get('review_revision')
+                or extra.get('release', {}).get('action') not in ('freed', 'nothing_to_free')
+                or snapshots != extra.get('manual_delete_selection')):
+            raise ValueError('Deletion selection does not match the persisted user request')
+        members = self.query('SELECT source_path,state FROM controller_file_batches WHERE batch_id=%s', (evidence['run_id'],))
+        frozen = {}
+        for row in members:
+            state = json.loads(row['state']) if isinstance(row['state'], str) else row['state']
+            if 'member' in state and not state.get('deferred'):
+                frozen[row['source_path']] = state['member']
+        if any(name not in frozen or list(value) != frozen[name] for name, value in snapshots.items()):
+            raise ValueError('Selection includes an unfrozen or changed file')
+        with TargetDirectory(source, target) as guard:
+            return self._delete_snapshot_targets(source, target, snapshots, evidence, None, guard,
+                                                 'user_selected_skip', 'not_confirmed', require_source=True)
+
+    def _delete_snapshot_targets(self, source, target, snapshots, evidence, progress, guard,
+                                 reason, backup_state, require_source=False):
         age = (datetime.datetime.now(datetime.timezone.utc)
                - datetime.datetime.fromisoformat(evidence['checked_at'])).total_seconds()
         if not 0 <= age <= 120:
@@ -690,9 +722,9 @@ class Inventory:
             return results
         names, keys = list(valid), [path_key(name) for name in valid]
         placeholders = ','.join(['%s'] * len(keys))
-        reason, stamp = 'relaxed_no_free_space', now()
+        stamp = now()
         with self.transaction():
-            rows = self.query('SELECT source_key,source_path,target_path,status,deletion_origin,deletion_reason,deleted_at '
+            rows = self.query('SELECT source_key,source_path,target_path,status,deletion_origin,deletion_reason,deleted_at,backup_state,backup_checked_at,backup_evidence '
                               'FROM files WHERE source_key IN (' + placeholders + ') FOR UPDATE', keys)
             previous = {row['source_path']: row for row in rows}
             for row in rows:
@@ -726,28 +758,31 @@ class Inventory:
                 (reason, evidence['run_id']))
             event_ids = {row['source_path']: row['id'] for row in ids}
             self.execute("""UPDATE files SET status='deleted',deleted_at=%s,deletion_origin='manual',
-                deletion_reason=%s,backup_state='aggregate_confirmed',backup_checked_at=%s,backup_evidence=%s
+                deletion_reason=%s,backup_state=%s,backup_checked_at=%s,backup_evidence=%s
                 WHERE source_key IN (""" + placeholders + ')',
-                [stamp, reason, evidence['checked_at'], json.dumps(evidence)] + keys)
+                [stamp, reason, backup_state, evidence['checked_at'], json.dumps(evidence)] + keys)
         completed = []
         for index, name in enumerate(names):
             path = file_path(target, name)
             unlinked = False
             try:
-                guard.unlink(name, valid[name])
+                if require_source:
+                    guard.unlink(name, valid[name], require_source=True)
+                else:
+                    guard.unlink(name, valid[name])
                 unlinked = True
                 completed.append(event_ids[name])
                 results.append({'file': name, 'action': 'deleted', 'deletion_origin': 'manual',
-                                'backup_state': 'aggregate_confirmed', 'event_id': event_ids[name]})
+                                'backup_state': backup_state, 'event_id': event_ids[name]})
             except Exception as exc:
                 self.execute("UPDATE deletion_events SET state='error',error_message=%s,finished_at=%s WHERE id=%s",
                              (type(exc).__name__, now(), event_ids[name]))
                 # Keep historical/manual provenance if the file has already gone.
                 if not unlinked and name in previous:
                     row = previous[name]
-                    self.execute('''UPDATE files SET status=%s,deleted_at=%s,deletion_origin=%s,deletion_reason=%s
-                        WHERE source_key=%s AND BINARY source_path=BINARY %s''',
-                        (row['status'], row['deleted_at'], row['deletion_origin'], row['deletion_reason'], path_key(name), name))
+                    self.execute('''UPDATE files SET status=%s,deleted_at=%s,deletion_origin=%s,deletion_reason=%s,
+                        backup_state=%s,backup_checked_at=%s,backup_evidence=%s WHERE source_key=%s AND BINARY source_path=BINARY %s''',
+                        (row['status'], row['deleted_at'], row['deletion_origin'], row['deletion_reason'], row['backup_state'], row['backup_checked_at'], row['backup_evidence'], path_key(name), name))
                 elif not unlinked and name in untracked:
                     self.execute("""DELETE FROM files WHERE source_key=%s AND BINARY source_path=BINARY %s
                         AND deletion_origin='manual' AND JSON_UNQUOTE(JSON_EXTRACT(backup_evidence,'$.run_id'))=%s""",

@@ -31,6 +31,21 @@ class SourceProtectionTests(unittest.TestCase):
         self.assertFalse(target.exists())
         self.assertEqual(self.original.read_bytes(), b'original remains untouched')
 
+    def test_selected_unlink_requires_unchanged_original(self):
+        target = self.target/'photo.jpg'
+        os.link(self.original,target)
+        with TargetDirectory(self.source,self.target) as guard:
+            guard.unlink('photo.jpg',identity(target),require_source=True)
+        self.assertTrue(self.original.exists())
+        os.link(self.original,target)
+        self.original.rename(self.source/'preserved.jpg')
+        self.original.symlink_to(self.source/'preserved.jpg')
+        with TargetDirectory(self.source,self.target) as guard:
+            with self.assertRaises(ValueError):
+                guard.unlink('photo.jpg',identity(target),require_source=True)
+        self.assertTrue(target.exists())
+        self.assertTrue((self.source/'preserved.jpg').exists())
+
     def test_source_as_target_and_overlaps_are_rejected(self):
         for source,target in [(self.source,self.source),(self.source,self.root),
                               (self.root,self.target),(self.source,self.source/'nested'),

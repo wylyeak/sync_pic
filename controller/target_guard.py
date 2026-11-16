@@ -137,13 +137,34 @@ class TargetDirectory:
             os.close(source_parent)
             os.close(parent)
 
-    def unlink(self, relative, expected):
+    def source_stat(self, relative):
+        # Validation and source walk use anchored descriptors, never follow links.
+        validation, _ = self._parent(relative)
+        os.close(validation)
+        parent = os.dup(self.source_fd)
+        try:
+            for part in relative.split(os.sep)[:-1]:
+                new = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=parent)
+                os.close(parent)
+                parent = new
+            value = os.stat(relative.split(os.sep)[-1], dir_fd=parent, follow_symlinks=False)
+            self._check_root()
+            return value
+        finally:
+            os.close(parent)
+
+    def unlink(self, relative, expected, require_source=False):
         parent, name = self._parent(relative)
         try:
             value = os.stat(name, dir_fd=parent, follow_symlinks=False)
             actual = (value.st_dev, value.st_ino, value.st_size, value.st_mtime_ns)
             if not stat.S_ISREG(value.st_mode) or actual != tuple(expected):
                 raise ValueError('Target changed before guarded unlink')
+            if require_source:
+                original = self.source_stat(relative)
+                source_fp = (original.st_dev, original.st_ino, original.st_size, original.st_mtime_ns)
+                if not stat.S_ISREG(original.st_mode) or source_fp != tuple(expected):
+                    raise ValueError('Original source missing or changed; preserving target')
             self._check_root()
             expected_parent = os.path.join(self.target, os.path.dirname(relative))
             if os.readlink('/proc/self/fd/{}'.format(parent)) != expected_parent.rstrip('/'):

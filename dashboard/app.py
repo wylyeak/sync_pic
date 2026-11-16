@@ -24,7 +24,7 @@ import config_service
 ROOT = Path(__file__).resolve().parent
 app = Flask(__name__, static_folder='static')
 app.json.ensure_ascii = False
-app.config['MAX_CONTENT_LENGTH'] = 16384
+app.config['MAX_CONTENT_LENGTH'] = 1048576  # Bounded file selections; config socket retains its smaller limit.
 
 
 @lru_cache(maxsize=1)
@@ -36,7 +36,7 @@ def build_info():
     return json.loads(path.read_text())
 
 PHASES = {'mapping': '建立硬链接', 'sync': '等待同步', 'backup': '等待相册备份',
-          'release': '相册释放', 'release_uncertain': '释放结果确认', 'manual_release': '手动跳到释放', 'manual_release_uncertain': '手动释放待确认', 'manual_release_sync': '释放同步与跳过确认', 'deletions': '等待删除同步',
+          'release': '相册释放', 'release_uncertain': '释放结果确认', 'manual_release': '手动跳到释放', 'manual_release_uncertain': '手动释放待确认', 'manual_release_sync': '释放删除同步确认', 'manual_review': '残留文件待处理', 'manual_delete': '删除已标记目标文件', 'manual_delete_sync': '等待手机删除同步', 'deletions': '等待删除同步',
           'observe': '残留观察', 'cleanup': '手动补充清理', 'final_sync': '最终删除同步', 'complete': '已完成'}
 ROUND_SELECT = """SELECT b.id,b.phase,UNIX_TIMESTAMP(b.updated_at) updated_at,
     UNIX_TIMESTAMP(b.started_at) started_at,UNIX_TIMESTAMP(b.ended_at) ended_at,
@@ -44,6 +44,7 @@ ROUND_SELECT = """SELECT b.id,b.phase,UNIX_TIMESTAMP(b.updated_at) updated_at,
     b.observations,b.file_count,b.planned_files,b.backed_up,b.deferred,b.mapping_skipped,
     b.timing_partial,b.release_action,b.summary,
     JSON_LENGTH(JSON_EXTRACT(b.extra,'$.manual_retained')) manual_retained_count,
+    JSON_LENGTH(JSON_EXTRACT(b.extra,'$.user_skipped')) user_skipped_count,
     (SELECT COUNT(*) FROM controller_file_batches m JOIN files f
       ON f.source_key=m.source_key AND BINARY f.source_path=BINARY m.source_path
       WHERE m.batch_id=b.id AND f.status='deleted' AND f.deletion_origin='manual') manual_deleted,
@@ -177,6 +178,8 @@ def round_row(row):
     row['phase_label'] = PHASES.get(row['phase'], row['phase'])
     if row['phase'] == 'complete' and row.get('manual_retained_count'):
         row['phase_label'] = '已结束 · 有跳过文件'
+    if row['phase'] == 'complete' and row.get('user_skipped_count'):
+        row['phase_label'] = '已结束 · 有页面标记删除'
     row['file_count'] = row.get('file_count') or 0
     row['deferred'] = row.get('deferred') or 0
     row['phase_seconds'] = row.get('phase_seconds') or {}
@@ -312,6 +315,45 @@ def release_batch(batch_id):
         return jsonify(data), status
     except (OSError, ValueError):
         return jsonify(error='控制器暂不可用，请稍后重试'), 503
+
+@app.route('/api/batches/<batch_id>/remaining', methods=['GET', 'POST'])
+def remaining_files(batch_id):
+    if not re.fullmatch('[a-f0-9]{32}', batch_id):
+        return jsonify(error='批次编号无效'), 400
+    if request.method == 'POST':
+        origin = request.headers.get('Origin')
+        if (origin and (urlsplit(origin).scheme not in ('http', 'https') or urlsplit(origin).netloc != request.host)) or request.headers.get('X-PicSync-Settings') != '1' or not request.is_json:
+            return jsonify(error='删除必须从本站页面确认'), 403
+        run = runtime()
+        if not run.get('available') or run.get('controller_stale'):
+            return jsonify(error='控制器离线，暂不能删除'), 503
+        if not run.get('syncthing', {}).get('ready'):
+            return jsonify(error='请等待删除同步完成'), 409
+        body = request.get_json()
+        if type(body) is not dict or set(body) != {'revision', 'files'} or not isinstance(body['revision'], str):
+            return jsonify(error='请求格式无效'), 400
+        try:
+            data, status = config_service.call('POST', dict(body, batch_id=batch_id), path='/delete-selected')
+            return jsonify(data), status
+        except (OSError, ValueError):
+            return jsonify(error='控制器暂不可用，请稍后重试'), 503
+    with db() as cur:
+        cur.execute('SELECT phase,extra FROM backup_batches WHERE id=%s', (batch_id,))
+        row = cur.fetchone()
+    if row is None:
+        return jsonify(error='批次不存在'), 404
+    if row['phase'] != 'manual_review':
+        return jsonify(error='请等待释放与删除同步确认后再查看残留'), 409
+    extra = json.loads(row['extra']) if isinstance(row['extra'], str) else row['extra']
+    with db() as cur:
+        cur.execute('SELECT source_path,state FROM controller_file_batches WHERE batch_id=%s', (batch_id,))
+        frozen = {r['source_path']: json.loads(r['state']) if isinstance(r['state'], str) else r['state'] for r in cur.fetchall()}
+    items = []
+    failures = {r['file']: r.get('error', '') for r in extra.get('selected_cleanup_results', []) if r.get('action') == 'error'}
+    for name, value in extra.get('manual_remaining', {}).items():
+        original = frozen.get(name, {})
+        items.append(dict(path=name, size_bytes=value[2], changed=original.get('member') != value or bool(original.get('deferred')), error=failures.get(name, '')))
+    return jsonify(batch_id=batch_id, revision=extra.get('manual_review_revision'), items=sorted(items, key=lambda r: r['path']))
 
 @app.route('/api/overview')
 def overview():

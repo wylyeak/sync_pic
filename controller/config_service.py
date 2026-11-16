@@ -91,6 +91,18 @@ def serve(controller):
             self.handle_settings()
 
         def do_POST(self):
+            if self.path == '/release':
+                try:
+                    size = int(self.headers.get('Content-Length', '0'))
+                    if not 0 < size <= MAX_BODY:
+                        raise ValueError()
+                    body = json.loads(self.rfile.read(size))
+                    if type(body) is not dict or set(body) != {'batch_id'} or not isinstance(body['batch_id'], str):
+                        raise ValueError()
+                except (ValueError, TypeError):
+                    return self.respond({'error': '请求格式无效'}, 400)
+                data, status = controller.request_release(body['batch_id'])
+                return self.respond(data, status)
             if self.path == '/scan' and hasattr(controller, 'request_scan'):
                 data, status = controller.request_scan()
                 return self.respond(data, status)

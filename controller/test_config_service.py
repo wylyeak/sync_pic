@@ -18,6 +18,15 @@ class ConfigServiceTests(unittest.TestCase):
                 self.assertTrue(data['accepted'])
                 controller.request_scan.assert_called_once_with()
 
+    def test_release_request_is_bound_to_batch_and_validated(self):
+        from unittest.mock import Mock
+        controller = SimpleNamespace(request_release=Mock(return_value=({'accepted': True}, 202)))
+        with tempfile.TemporaryDirectory() as root, patch.dict(os.environ, PICSYNC_CONFIG_SOCKET=str(Path(root, 'config.sock'))):
+            with config_service.serve(controller):
+                self.assertEqual(config_service.call('POST', {'batch_id': 'test'}, path='/release')[1], 202)
+                controller.request_release.assert_called_once_with('test')
+                self.assertEqual(config_service.call('POST', {'batch_id': []}, path='/release')[1], 400)
+
     def test_socket_api_edits_original_and_never_returns_private_content(self):
         with tempfile.TemporaryDirectory() as root:
             path = Path(root, 'config.toml')

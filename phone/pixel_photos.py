@@ -195,16 +195,16 @@ class Phone:
             raise RuntimeError('未识别到已安全备份说明和释放按钮，停止操作')
         return root, buttons[0].get('text')
 
-    def release_space(self, execute=False):
+    def release_space(self, execute=False, allow_incomplete=False):
         """A recognized completion/no-items result is required by retention cleanup."""
         status = self.status()
-        if status['state'] != 'complete':
+        if status['state'] != 'complete' and not allow_incomplete:
             return {'action': 'skipped', 'status': status}
         time.sleep(10)
         self.adb('shell', 'input', 'keyevent', 'KEYCODE_BACK')
         root = self.menu()
         fresh = backup_status(root)
-        if fresh['state'] != 'complete':
+        if fresh['state'] != 'complete' and not allow_incomplete:
             return {'action': 'skipped', 'status': fresh}
         root, button = self.free_page(root)
         if not execute:

@@ -36,13 +36,14 @@ def build_info():
     return json.loads(path.read_text())
 
 PHASES = {'mapping': '建立硬链接', 'sync': '等待同步', 'backup': '等待相册备份',
-          'release': '相册释放', 'release_uncertain': '释放结果确认', 'deletions': '等待删除同步',
+          'release': '相册释放', 'release_uncertain': '释放结果确认', 'manual_release': '手动跳到释放', 'manual_release_uncertain': '手动释放待确认', 'manual_release_sync': '释放同步与跳过确认', 'deletions': '等待删除同步',
           'observe': '残留观察', 'cleanup': '手动补充清理', 'final_sync': '最终删除同步', 'complete': '已完成'}
 ROUND_SELECT = """SELECT b.id,b.phase,UNIX_TIMESTAMP(b.updated_at) updated_at,
     UNIX_TIMESTAMP(b.started_at) started_at,UNIX_TIMESTAMP(b.ended_at) ended_at,
     UNIX_TIMESTAMP(b.phase_started_at) phase_started_at,UNIX_TIMESTAMP(b.next_check) next_check,
     b.observations,b.file_count,b.planned_files,b.backed_up,b.deferred,b.mapping_skipped,
     b.timing_partial,b.release_action,b.summary,
+    JSON_LENGTH(JSON_EXTRACT(b.extra,'$.manual_retained')) manual_retained_count,
     (SELECT COUNT(*) FROM controller_file_batches m JOIN files f
       ON f.source_key=m.source_key AND BINARY f.source_path=BINARY m.source_path
       WHERE m.batch_id=b.id AND f.status='deleted' AND f.deletion_origin='manual') manual_deleted,
@@ -174,6 +175,8 @@ def round_row(row):
         if row.get(field) is not None and not isinstance(row[field], str):
             row[field] = float(row[field])
     row['phase_label'] = PHASES.get(row['phase'], row['phase'])
+    if row['phase'] == 'complete' and row.get('manual_retained_count'):
+        row['phase_label'] = '已结束 · 有跳过文件'
     row['file_count'] = row.get('file_count') or 0
     row['deferred'] = row.get('deferred') or 0
     row['phase_seconds'] = row.get('phase_seconds') or {}
@@ -290,6 +293,22 @@ def start_scan():
         return jsonify(error='控制器离线，暂不能开始扫描'), 503
     try:
         data, status = config_service.call('POST', path='/scan')
+        return jsonify(data), status
+    except (OSError, ValueError):
+        return jsonify(error='控制器暂不可用，请稍后重试'), 503
+
+@app.route('/api/batches/<batch_id>/release', methods=['POST'])
+def release_batch(batch_id):
+    origin = request.headers.get('Origin')
+    if (origin and (urlsplit(origin).scheme not in ('http', 'https') or urlsplit(origin).netloc != request.host)) or request.headers.get('X-PicSync-Settings') != '1':
+        return jsonify(error='释放必须从本站页面触发'), 403
+    run = runtime()
+    if not run.get('available') or run.get('controller_stale'):
+        return jsonify(error='控制器离线，暂不能释放'), 503
+    if not run.get('syncthing', {}).get('ready'):
+        return jsonify(error='请等待 Syncthing 同步完成后再释放'), 409
+    try:
+        data, status = config_service.call('POST', {'batch_id': batch_id}, path='/release')
         return jsonify(data), status
     except (OSError, ValueError):
         return jsonify(error='控制器暂不可用，请稍后重试'), 503

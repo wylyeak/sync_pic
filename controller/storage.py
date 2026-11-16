@@ -466,6 +466,13 @@ class Inventory:
         return {r['source_path']: r['batch_id'] for r in
                 self.query('SELECT source_path,batch_id FROM controller_file_batches')}
 
+    def manual_retained_targets(self):
+        retained = {}
+        for row in self.query("SELECT extra FROM backup_batches WHERE phase='complete' AND JSON_EXTRACT(extra,'$.manual_retained') IS NOT NULL"):
+            extra = json.loads(row['extra']) if isinstance(row['extra'], str) else row['extra']
+            retained.update(extra.get('manual_retained', {}))
+        return retained
+
     def claim_batch_paths(self, batch_id, paths):
         # Caller transaction commits claims together with the persisted round.
         paths = sorted(set(paths))

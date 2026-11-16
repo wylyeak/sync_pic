@@ -3,7 +3,7 @@ from datetime import datetime
 
 PHASES = {
     'mapping': '建立硬链接', 'sync': '等待同步', 'backup': '等待相册备份',
-    'release': '相册释放', 'release_uncertain': '释放操作及结果确认',
+    'release': '相册释放', 'release_uncertain': '释放操作及结果确认', 'manual_release': '手动跳到释放', 'manual_release_uncertain': '手动释放待确认', 'manual_release_sync': '释放同步与跳过确认',
     'deletions': '等待删除同步', 'observe': '残留观察',
     'cleanup': '手动补充清理', 'final_sync': '最终删除同步',
 }
@@ -46,6 +46,8 @@ def summary(batch, manual_deleted):
         '各阶段耗时（含等待及重启间隔）：']
     lines += [f'{label}：{duration(batch.get("phase_seconds", {}).get(phase, 0))}'
               for phase, label in PHASES.items()]
+    if batch.get('manual_release_requested_at'):
+        lines.append(f"本批手动跳到释放；残留 {len(batch.get('manual_retained', {}))} 个已跳过，待手动处理，未确认备份。")
     if batch.get('timing_partial'):
         lines.append('本批升级前阶段耗时未记录，以上阶段统计从升级时开始。')
         if backed_up is not None:

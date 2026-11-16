@@ -126,6 +126,7 @@ class Controller:
         self.events = queue.SimpleQueue()
         self.scan_lock = threading.Lock()
         self.scan_requested = threading.Event()
+        self.release_requests = queue.Queue(maxsize=1)
         self.scan_running = False
         self.source, self.target = config['directories']['source'], config['directories']['target']
         self.connection = {k: config['mysql'][k] for k in ('host', 'port', 'user')}
@@ -175,6 +176,16 @@ class Controller:
             if self.scan_running or self.scan_requested.is_set():
                 return dict(error='扫描正在进行或已请求，请稍候'), 409
             self.scan_requested.set()
+        return dict(accepted=True), 202
+
+    def request_release(self, batch_id):
+        batch = self.round
+        if not batch or batch['id'] != batch_id or batch['phase'] not in ('backup', 'manual_release_uncertain'):
+            return dict(error='批次已变化或当前阶段不能跳到释放'), 409
+        try:
+            self.release_requests.put_nowait(batch_id)
+        except queue.Full:
+            return dict(error='释放请求已在等待处理'), 409
         return dict(accepted=True), 202
 
     def wait_scan(self):
@@ -485,6 +496,8 @@ class Controller:
         self.scan_target()
         members = self.snapshot()
         owners = self.db.batch_owners()
+        retained = self.db.manual_retained_targets() if any(name in owners for name in members) else {}
+        members = {name: value for name, value in members.items() if retained.get(name) != value}
         if any(name in owners for name in members):
             # Existing owned targets must be handled by their original round;
             # never adopt them into a new round, even if their bytes changed.
@@ -579,6 +592,14 @@ class Controller:
                 return min(60, self.c['monitor']['interval'])
             if not self.new_round():
                 return self.c['monitor']['idle_interval']
+        requests = getattr(self, 'release_requests', None)
+        if requests is not None and not requests.empty():
+            requested = requests.get_nowait()
+            if requested == self.round['id'] and self.round['phase'] in ('backup', 'manual_release_uncertain'):
+                if not before['ready']:
+                    raise SyncthingUnavailable('同步尚未完成，请同步完成后重新请求释放')
+                self.round['manual_release_requested_at'] = time.time()
+                self.save('manual_release')
         phase = self.round['phase']
         if phase == 'mapping':
             return 1 if self.map_round() else min(60, self.c['monitor']['interval'])
@@ -602,7 +623,30 @@ class Controller:
             self.observation.reset()
             self.save()
             return self.c['monitor']['interval']
-        if phase == 'sync':
+        if phase == 'manual_release':
+            # Persist ambiguity before any UI click; never replay after restart.
+            self.save('manual_release_uncertain')
+            with self.device():
+                result = self.phone_call('release_space', execute=True, allow_incomplete=True)
+            self.round['release'] = result
+            self.save('manual_release_sync' if result['action'] in ('freed', 'nothing_to_free') else 'manual_release_uncertain')
+        elif phase == 'manual_release_uncertain':
+            raise PhoneUnavailable('手动释放结果待确认；请检查相册后在页面重新请求释放')
+        elif phase == 'manual_release_sync':
+            # No aggregate backup proof and no fallback unlink in this path.
+            # Only Google Photos decides which safely backed-up items to free.
+            current = self.batch_snapshot()
+            after = self.sync_status()
+            fresh = self.batch_snapshot()
+            valid = after['ready'] and before['token'] == after['token'] and current == fresh
+            count = self.observation.sample(valid, [before['token'], current], time.time(), self.c['observation']['interval'])
+            self.save()
+            if count >= self.c['observation']['confirmations']:
+                self.round['manual_retained'] = fresh
+                self.round['deferred'] = sorted(set(self.round.get('deferred', [])) | set(fresh))
+                self.save('complete')
+                self.flush_batch_reports()
+        elif phase == 'sync':
             self.save('backup')
         elif phase == 'backup':
             with self.device():

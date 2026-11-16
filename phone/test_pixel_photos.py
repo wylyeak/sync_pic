@@ -131,6 +131,17 @@ class StatusTests(unittest.TestCase):
             self.assertEqual(phone.release_space(execute=True)['action'], 'skipped')
         page.assert_not_called()
 
+    def test_explicit_partial_release_uses_safe_free_page_without_completion(self):
+        phone = Phone(SimpleNamespace(container='pixel-web', serial='test'))
+        root = ET.fromstring('<hierarchy><node text="设备过热"/></hierarchy>')
+        with patch.object(phone, 'status', return_value={'state': 'blocked'}), \
+             patch.object(phone, 'adb'), patch.object(phone, 'menu', return_value=root), \
+             patch.object(phone, 'free_page', return_value=(root, None)) as page, \
+             patch.object(phone, 'tap') as tap, patch('pixel_photos.time.sleep'):
+            self.assertEqual(phone.release_space(execute=True, allow_incomplete=True)['action'], 'nothing_to_free')
+        page.assert_called_once_with(root)
+        tap.assert_not_called()
+
     def test_no_items_is_a_confirmed_result_only_in_execute_mode(self):
         phone = Phone(SimpleNamespace(container='pixel-web', serial='test'))
         root = ET.fromstring('<hierarchy><node clickable="true"><node text="备份"/><node text="备份已完成"/></node></hierarchy>')

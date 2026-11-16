@@ -3,7 +3,7 @@ from datetime import datetime
 
 PHASES = {
     'mapping': '建立硬链接', 'sync': '等待同步', 'backup': '等待相册备份',
-    'release': '相册释放', 'release_uncertain': '释放操作及结果确认', 'manual_release': '手动跳到释放', 'manual_release_uncertain': '手动释放待确认', 'manual_release_sync': '释放删除同步确认', 'manual_review': '残留文件待处理', 'manual_delete': '删除已标记目标文件', 'manual_delete_sync': '等待手机删除同步',
+    'release': '相册释放', 'release_uncertain': '释放操作及结果确认', 'manual_release_requested': '释放已请求', 'manual_delete_requested': '删除已请求', 'manual_release': '手动跳到释放', 'manual_release_uncertain': '手动释放待确认', 'manual_release_sync': '释放删除同步确认', 'manual_review': '残留文件待处理', 'manual_delete': '删除已标记目标文件', 'manual_delete_sync': '等待手机删除同步',
     'deletions': '等待删除同步', 'observe': '残留观察',
     'cleanup': '手动补充清理', 'final_sync': '最终删除同步',
 }

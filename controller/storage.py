@@ -44,7 +44,7 @@ def file_path(root, relative):
 
 
 class Inventory:
-    def __init__(self, database, **connection):
+    def __init__(self, database, initialize=True, **connection):
         if not re.fullmatch(r'[A-Za-z0-9_]{1,64}', database):
             raise ValueError('MySQL database name must contain only letters, digits or underscores')
         self.database, self.connection_options = database, dict(connection)
@@ -53,6 +53,10 @@ class Inventory:
                                     connect_timeout=10, read_timeout=60, write_timeout=60,
                                     **connection)
         try:
+            if not initialize:
+                self.conn.select_db(database)
+                self.execute('SET SESSION innodb_lock_wait_timeout=3')
+                return
             self.execute('CREATE DATABASE IF NOT EXISTS `{}` CHARACTER SET utf8mb4 COLLATE utf8mb4_bin'.format(database))
             self.conn.select_db(database)
             self.execute('''CREATE TABLE IF NOT EXISTS files (

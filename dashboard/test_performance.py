@@ -124,4 +124,17 @@ class EndpointPerformanceTests(unittest.TestCase):
         self.assertEqual(cursor.execute.call_args_list[0].args, ("SET time_zone='+00:00'",))
         self.assertEqual(cursor.execute.call_args_list[1].args, ('SET SESSION TRANSACTION READ ONLY',))
 
+class CommandStatusTests(unittest.TestCase):
+    def test_committed_command_is_visible_until_controller_acknowledges_it(self):
+        import time
+        stamp=time.time()
+        data={'controller':{'batch_id':'batch','phase':'backup','checked_at':stamp,'manual_command_requested_at':0},
+              'actions':{'checked_at':stamp+1,'manual_command':{'id':'new','batch_id':'batch','phase':'manual_release_requested','requested_at':stamp}}}
+        with patch('app.settings',return_value={'dashboard':{'telemetry':'unused'}}),patch('pathlib.Path.read_text',side_effect=lambda:json.dumps(data)):
+            self.assertEqual(web.runtime()['controller']['phase'],'manual_release_requested')
+            data['controller'].update(phase='manual_release_uncertain',manual_command_id='new',manual_command_requested_at=stamp)
+            self.assertEqual(web.runtime()['controller']['phase'],'manual_release_uncertain')
+            data['controller'].update(phase='manual_delete_sync',manual_command_id='newer',manual_command_requested_at=stamp+10)
+            self.assertEqual(web.runtime()['controller']['phase'],'manual_delete_sync')
+
 if __name__=='__main__':unittest.main()

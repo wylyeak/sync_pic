@@ -3,6 +3,9 @@ import datetime as dt
 import hashlib
 import json
 import os
+import time
+import uuid
+from batch_report import transition
 
 VERSION = 'normalized_batches_v1'
 TIMES = ('started_at', 'ended_at', 'phase_started_at', 'next_check')
@@ -45,6 +48,12 @@ def split_files(batch):
         item(result['file']).setdefault('cleanup', []).append([order, result])
     return files
 
+
+class ManualCommandPending(Exception):
+    """A newer committed command superseded an in-flight controller snapshot."""
+
+class ManualCommandConflict(ValueError):
+    pass
 
 class BatchStore:
     def __init__(self, db):
@@ -105,7 +114,13 @@ class BatchStore:
             self.cached_id = None
             self.db.query('SELECT RELEASE_LOCK(%s)', (key,))
 
-    def _write(self, batch):
+    def _write(self, batch, allow_manual_command=False):
+        rows = self.db.query('SELECT extra FROM backup_batches WHERE id=%s FOR UPDATE', (batch['id'],))
+        if rows and not allow_manual_command:
+            current = decoded(rows[0]['extra'], {}).get('manual_command', {}).get('id')
+            incoming = batch.get('manual_command', {}).get('id')
+            if current != incoming:
+                raise ManualCommandPending('New manual command committed; reload batch before saving')
         files = split_files(batch)
         # All per-file facts must refer to frozen members/candidates, never add
         # ownership through a stray cleanup result or backup evidence.
@@ -154,6 +169,39 @@ class BatchStore:
             ON DUPLICATE KEY UPDATE seconds=VALUES(seconds)''',
             [(batch['id'],name,seconds) for name,seconds in durations.items() if seconds != phases.get(name)])
         return files, durations
+
+    def request_manual_action(self, batch_id, kind, revision=None, files=None):
+        """Commit the requested phase before acknowledging the HTTP operation."""
+        with self.db.transaction():
+            rows = self.db.query('SELECT phase FROM backup_batches WHERE id=%s FOR UPDATE', (batch_id,))
+            if not rows:
+                raise ManualCommandConflict('批次不存在或已结束')
+            batch = self.load(batch_id)
+            if kind == 'release':
+                if batch['phase'] not in ('backup', 'manual_release_uncertain'):
+                    raise ManualCommandConflict('批次阶段已变化或释放请求已提交')
+                phase = 'manual_release_requested'
+            elif kind == 'delete':
+                if batch['phase'] != 'manual_review' or batch.get('manual_review_revision') != revision:
+                    raise ManualCommandConflict('残留列表已变化，请刷新后重新选择')
+                if (type(files) is not list or not 0 < len(files) <= 2000
+                        or any(not isinstance(name, str) for name in files) or len(set(files)) != len(files)):
+                    raise ValueError('请选择 1–2000 个不同的文件')
+                remaining = batch.get('manual_remaining', {})
+                if any(name not in remaining or remaining[name] != batch['members'].get(name)
+                       or name in batch.get('deferred', []) for name in files):
+                    raise ManualCommandConflict('选择包含已变化或非本批残留文件')
+                batch['manual_delete_selection'] = {name: remaining[name] for name in files}
+                phase = 'manual_delete_requested'
+            else:
+                raise ValueError('Unsupported manual command')
+            stamp = time.time()
+            batch['manual_command'] = dict(id=uuid.uuid4().hex, kind=kind, requested_at=stamp)
+            batch['manual_release_requested_at' if kind == 'release' else 'manual_delete_requested_at'] = stamp
+            transition(batch, phase, stamp)
+            batch['observations'], batch['next_check'] = 0, 0
+            self._write(batch, allow_manual_command=True)
+        return batch
 
     def save(self, batch):
         try:

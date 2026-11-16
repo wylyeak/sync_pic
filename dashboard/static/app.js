@@ -17,8 +17,8 @@ const statusLabel={pending:'待映射',linked:'已映射',deleted:'已移除',in
 const originLabel={manual:'手动清理',syncthing:'Syncthing',unknown:'来源未知'};
 const backupLabel={unknown:'未确认',confirmed:'逐张确认',aggregate_confirmed:'整体确认',failed:'备份失败',not_confirmed:'未确认'};
 const reasonLabel={user_selected_skip:'页面标记删除 · 未确认云端备份',relaxed_no_free_space:'相册无可释放内容 · 补充清理',photos_retained:'已备份照片残留清理',manual_after_backup:'单文件备份确认后清理',unresolved_manual_intent:'未完成删除意图 · 待核对'};
-const phaseOrder=['mapping','sync','backup','release','release_uncertain','manual_release','manual_release_uncertain','manual_release_sync','manual_review','manual_delete','manual_delete_sync','deletions','observe','cleanup','final_sync','complete'];
-const phaseLabels={mapping:'建立硬链接',sync:'等待同步',backup:'等待相册备份',release:'相册释放',release_uncertain:'释放操作及结果确认',manual_release:'手动跳到释放',manual_release_uncertain:'手动释放待确认',manual_release_sync:'释放删除同步确认',manual_review:'残留文件待处理',manual_delete:'删除已标记目标文件',manual_delete_sync:'等待手机删除同步',deletions:'等待删除同步',observe:'残留观察',cleanup:'手动补充清理',final_sync:'最终删除同步',complete:'已完成'};
+const phaseOrder=['mapping','sync','backup','release','release_uncertain','manual_release_requested','manual_delete_requested','manual_release','manual_release_uncertain','manual_release_sync','manual_review','manual_delete','manual_delete_sync','deletions','observe','cleanup','final_sync','complete'];
+const phaseLabels={mapping:'建立硬链接',sync:'等待同步',backup:'等待相册备份',release:'相册释放',release_uncertain:'释放操作及结果确认',manual_release_requested:'释放已请求',manual_delete_requested:'删除已请求',manual_release:'手动跳到释放',manual_release_uncertain:'手动释放待确认',manual_release_sync:'释放删除同步确认',manual_review:'残留文件待处理',manual_delete:'删除已标记目标文件',manual_delete_sync:'等待手机删除同步',deletions:'等待删除同步',observe:'残留观察',cleanup:'手动补充清理',final_sync:'最终删除同步',complete:'已完成'};
 const state={view:'overview',data:null,pages:{batches:1,files:1,audits:1},batchFilter:'',busy:false,drawerOpener:null,requestVersion:0,drawerVersion:0,apiCache:new Map(),apiInflight:new Map(),listController:null,listPending:null,listView:null,overviewPending:null,runtimePending:null,refreshPending:{},listSignatures:{}};
 async function api(url,{signal,cacheMs=3000}={}){
  if(signal?.aborted)throw signal.reason;
@@ -45,6 +45,35 @@ async function api(url,{signal,cacheMs=3000}={}){
  state.apiInflight.set(url,entry);
  return entry.promise;
 }
+function rememberRuntime(run){
+ const old=state.latestRuntime;
+ if(old&&run.available===false){state.latestRuntime={...old,available:false,controller_stale:true};return state.latestRuntime;}
+ if(old&&((old.controller?.checked_at||0)>(run.controller?.checked_at||0)||
+  ((old.controller?.checked_at||0)===(run.controller?.checked_at||0)&&(old.updated_at||0)>(run.updated_at||0))))return old;
+ state.latestRuntime=run;return run;
+}
+function effectiveBatch(row,run){
+ const ctrl=run?.controller||{};
+ if(!ctrl.batch_id||!ctrl.phase)return row;
+ if(ctrl.phase==='complete')return null;
+ const base=row?.id===ctrl.batch_id?row:{id:ctrl.batch_id,file_count:null,started_at:null};
+ return {...base,phase:ctrl.phase,phase_label:phaseLabels[ctrl.phase]||ctrl.phase,observations:ctrl.observations??base.observations};
+}
+function updateBatchActions(run){
+ const ctrl=run?.controller||{};
+ if(ctrl.batch_id&&ctrl.phase){
+  const pending=state.releasePending?.get(ctrl.batch_id);
+  if(pending&&(pending.phase!==ctrl.phase||pending.startedAt!==ctrl.started_at||(ctrl.phase==='manual_release_uncertain'&&ctrl.state==='error'&&ctrl.checked_at>pending.checkedAt&&pending.status!=='sending')))state.releasePending.delete(ctrl.batch_id);
+ }
+ document.querySelectorAll('[data-actions-batch]').forEach(box=>{
+  const id=box.dataset.actionsBatch;
+  const phase=ctrl.batch_id?(ctrl.batch_id===id?ctrl.phase:'complete'):box.dataset.actionPhase;
+  const signature=JSON.stringify([phase,ctrl.state,run.controller_stale,run.available,state.releasePending?.get(id)?.status]);
+  if(box.dataset.actionSignature!==signature){box.innerHTML=actionMarkup(id,phase);box.dataset.actionSignature=signature;}
+ });
+ document.querySelectorAll('[data-phase-batch]').forEach(box=>{if(box.dataset.phaseBatch===ctrl.batch_id)box.innerHTML=badge(phaseLabels[ctrl.phase]||ctrl.phase,ctrl.phase==='complete'?'green':'blue');});
+ document.querySelectorAll('[data-live-phase]').forEach(box=>{if(box.dataset.livePhase===ctrl.batch_id)box.innerHTML=phaseBadge({phase:ctrl.phase,phase_label:phaseLabels[ctrl.phase]||ctrl.phase});});
+}
 function runtimeNotice(run){
  const ctrl=run.controller||{};
  const message=!run.available?'控制器尚未发布运行状态，文件库存与批次记录仍可查询。':run.controller_stale?'控制器状态已超过 3 分钟未更新，以下设备状态是最近一次检查结果。':ctrl.state==='error'?(ctrl.error||'控制器检测到异常，已暂停相关操作。'):'';
@@ -67,7 +96,7 @@ function syncProgress(){
  box.innerHTML=`<div class="sync-progress-top"><span>${esc(label)}</span><strong>${percent}%</strong></div><div class="sync-progress-track" role="progressbar" aria-label="Pixel 文件夹同步进度" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${value}"><div style="width:${value}%"></div></div><div class="sync-progress-details"><span>剩余 ${remaining} / ${total}</span><span>${items} 项待同步 · ${deletes} 项待删除</span></div><div class="sync-progress-foot">文件夹整体进度 · 检查于 ${esc(date(sync.progress_checked_at||sync.checked_at,true))}</div>`;
 }
 function updateSyncProgress(run){
- state.latestRuntime=run;
+ run=rememberRuntime(run);
  const ctrl=run.controller||{},active=state.data?.active;
  const phase=ctrl.phase||(active?.phase),id=ctrl.batch_id||active?.id;
  let box=$('sync-progress');
@@ -75,21 +104,34 @@ function updateSyncProgress(run){
  box.hidden=!['sync','deletions','final_sync','manual_release_sync','manual_delete_sync'].includes(phase)||!id;
  syncProgress();
 }
-function releaseButton(id,phase){
+function actionMarkup(id,phase){
+ if(state.latestRuntime?.controller_stale||state.latestRuntime?.available===false)return '<p class="subtle" role="status">控制器状态不可用，暂不能操作。</p>';
+ const pending=state.releasePending?.get(id);
+ if(pending)return `<button class="primary-button" disabled>${pending.status==='sending'?'正在提交…':pending.status==='unknown'?'请求结果待核对':'已提交 · 等待处理'}</button><p class="subtle" role="status">${pending.status==='sending'?'正在提交释放请求…':pending.status==='unknown'?'请求响应超时或连接中断，正在核对最新状态，请勿重复提交。':'释放请求已接受，当前检查完成后开始处理。'}</p>`;
+ if(phase==='manual_release_uncertain'&&state.latestRuntime?.controller?.batch_id===id&&!['waiting','error'].includes(state.latestRuntime.controller.state))return '<p class="subtle" role="status">正在执行相册释放，请等待结果…</p>';
  if(phase==='manual_review')return `<button class="primary-button" data-review="${esc(id)}">查看残留并标记删除</button><p class="subtle">释放和删除同步已确认，请选择要删除的残留文件；源原片保留。</p>`;
- return ['backup','manual_release_uncertain'].includes(phase)?`<button class="primary-button" data-release="${esc(id)}" ${state.releaseSubmitting?'disabled':''}>跳到释放阶段</button><p class="subtle">先释放已备份内容并同步删除，再由你在页面标记残留文件删除。</p>`:'';
+ return ['backup','manual_release_uncertain'].includes(phase)?`<button class="primary-button" data-release="${esc(id)}">跳到释放阶段</button><p class="subtle">先释放已备份内容并同步删除，再由你在页面标记残留文件删除。</p>`:'';
+}
+function releaseButton(id,phase){
+ const ctrl=state.latestRuntime?.controller;
+ if(ctrl?.batch_id)phase=ctrl.batch_id===id?ctrl.phase:'complete';
+ return `<div data-actions-batch="${esc(id)}" data-action-phase="${esc(phase)}" aria-live="polite">${actionMarkup(id,phase)}</div>`;
 }
 async function requestRelease(id){
- if(state.releaseSubmitting)return;
+ state.releasePending??=new Map();
+ if(state.releaseSubmitting||state.releasePending.has(id))return;
  if(!window.confirm('跳过本批剩余备份，立即让 Google 相册释放已安全备份的内容？\n\n释放并同步删除后，将列出残留文件，由你在页面勾选删除。不会把残留标为已备份。相册释放范围可能包含其他已备份内容。'))return;
- state.releaseSubmitting=true;
- document.querySelectorAll('[data-release]').forEach(b=>b.disabled=true);
+ const ctrl=state.latestRuntime?.controller||{};
+ const pending={status:'sending',phase:ctrl.phase||state.data?.active?.phase||'backup',startedAt:ctrl.started_at,checkedAt:ctrl.checked_at};
+ state.releasePending.set(id,pending);state.releaseSubmitting=true;
+ updateBatchActions(state.latestRuntime||{});
  try{
-  const response=await fetch('/api/batches/'+encodeURIComponent(id)+'/release',{method:'POST',headers:{'X-PicSync-Settings':'1'}});
-  const data=await response.json();if(!response.ok)throw new Error(data.error||'请求失败');
-  banner('释放请求已接受，将在当前检查结束后处理。');
- }catch(error){banner(error.message);}
- finally{state.releaseSubmitting=false;document.querySelectorAll('[data-release]').forEach(b=>b.disabled=false);}
+  const response=await fetch('/api/batches/'+encodeURIComponent(id)+'/release',{method:'POST',headers:{'X-PicSync-Settings':'1'},signal:AbortSignal.timeout(15000)});
+  const data=await response.json();if(!response.ok){state.releasePending.delete(id);throw new Error(data.error||'请求失败');}
+  pending.status='accepted';state.apiCache.clear();
+  if(data.runtime){const run=rememberRuntime(data.runtime);if(state.data)state.data.runtime=run;renderActiveBatch(state.data?.active,run);updateBatchActions(run);}
+ }catch(error){if(state.releasePending.has(id))pending.status='unknown';banner(error.message);}
+ finally{state.releaseSubmitting=false;updateBatchActions(state.latestRuntime||{});refreshRuntime().catch(()=>{});}
 }
 async function reviewRemaining(id){
  const version=openDrawer();
@@ -104,21 +146,41 @@ async function deleteSelected(button){
  const selected=[...document.querySelectorAll('[data-delete-path]:checked')].map(n=>n.value);
  if(!selected.length||selected.length>2000){banner('请选择 1–2000 个文件');return;}
  if(!window.confirm(`确定标记删除这 ${selected.length} 个目标文件及手机同步副本？\n包括你所选的未备份文件。NAS 源原片保留，之后重传需手动安排。`))return;
- state.deleteSubmitting=true;button.disabled=true;
+ state.deleteSubmitting=true;button.disabled=true;button.textContent='正在标记删除…';
  try{
-  const response=await fetch('/api/batches/'+encodeURIComponent(button.dataset.deleteBatch)+'/remaining',{method:'POST',headers:{'Content-Type':'application/json','X-PicSync-Settings':'1'},body:JSON.stringify({revision:button.dataset.deleteRevision,files:selected})});
+  const response=await fetch('/api/batches/'+encodeURIComponent(button.dataset.deleteBatch)+'/remaining',{method:'POST',headers:{'Content-Type':'application/json','X-PicSync-Settings':'1'},body:JSON.stringify({revision:button.dataset.deleteRevision,files:selected}),signal:AbortSignal.timeout(15000)});
   const data=await response.json();if(!response.ok)throw new Error(data.error||'标记失败');
-  state.apiCache.clear();$('drawer-content').innerHTML=empty(`已标记 ${data.selected} 个文件，等待服务端删除及手机删除同步。`);
- }catch(error){banner(error.message);button.disabled=false;}
+  state.apiCache.clear();if(data.runtime){const run=rememberRuntime(data.runtime);if(state.data)state.data.runtime=run;renderActiveBatch(state.data?.active,run);updateBatchActions(run);}$('drawer-content').innerHTML=empty(`已标记 ${data.selected} 个文件，等待服务端删除及手机删除同步。`);
+ }catch(error){banner(error.message);button.disabled=false;button.textContent='标记所选文件删除';}
  finally{state.deleteSubmitting=false;}
 }
 document.addEventListener('change',event=>{if(event.target.id==='remaining-all')document.querySelectorAll('[data-delete-path]:not(:disabled)').forEach(n=>n.checked=event.target.checked);});
 function detailItem(label,value){return `<div class="detail-item"><small>${esc(label)}</small><span>${esc(value??'未记录')}</span></div>`;}
 function roundLink(row){return `<button class="batch-link" data-batch="${esc(row.id)}">#${esc(row.id.slice(0,8))} ↗</button>`;}
-function phaseBadge(row){return badge(row.phase_label||phaseLabels[row.phase]||row.phase,row.manual_retained_count||row.user_skipped_count?'amber':row.phase==='complete'?'green':'blue');}
+function phaseBadge(row){
+ const ctrl=state.latestRuntime?.controller;
+ const phase=ctrl?.batch_id&&ctrl.batch_id===row.id?ctrl.phase:row.phase;
+ const label=phase!==row.phase?(phaseLabels[phase]||phase):(row.phase_label||phaseLabels[phase]||phase);
+ const result=badge(label,row.manual_retained_count||row.user_skipped_count?'amber':phase==='complete'?'green':'blue');
+ return row.id?`<span data-phase-batch="${esc(row.id)}">${result}</span>`:result;
+}
 function batchTable(items,compact=false){if(!items.length)return empty('新的备份批次将在这里出现');return `<table><thead><tr><th>批次</th><th>开始时间</th><th>文件数</th><th>状态</th><th>手动删除</th><th>同步删除</th>${compact?'':'<th>备份确认</th><th>总耗时</th>'}</tr></thead><tbody>${items.map(r=>`<tr><td>${roundLink(r)}</td><td>${esc(date(r.started_at,true))}</td><td>${num(r.file_count)}</td><td>${phaseBadge(r)}</td><td>${r.manual_deleted==null?'—':num(r.manual_deleted)}</td><td>${r.syncthing_deleted==null?'—':num(r.syncthing_deleted)}</td>${compact?'':`<td>${r.backed_up==null?'未记录':num(r.backed_up)}</td><td>${r.started_at?esc(elapsed((r.ended_at||Date.now()/1000)-r.started_at)):'—'}</td>`}</tr>`).join('')}</tbody></table>`;}
+function renderActiveBatch(row,run){
+ const active=effectiveBatch(row,run);
+ const signature=JSON.stringify([active,run.controller?.state,run.controller?.error,run.controller_stale,Math.floor(Date.now()/10000)]);
+ if(state.activeCardSignature===signature){updateSyncProgress(run);updateBatchActions(run);return;}
+ state.activeCardSignature=signature;
+ if(active){
+  const index=phaseOrder.indexOf(active.phase),groups=[['mapping','映射'],['sync','同步'],['backup','备份'],['release','释放'],['observe','观察'],['final_sync','完成']];
+  const currentGroup=active.phase.startsWith('manual_')||active.phase==='release_uncertain'||active.phase==='deletions'?3:active.phase==='cleanup'?4:Math.max(0,groups.findIndex(([p])=>p===active.phase));
+  const control=run.controller||{},error=control.state==='error';
+  $('batch-badge').className='badge '+(error?'red':run.controller_stale?'amber':'blue');$('batch-badge').textContent=error?'异常 · 已暂停':run.controller_stale?'等待状态更新':active.phase_label;
+  $('active-batch').innerHTML=`<div class="batch-meta"><span class="batch-id">BATCH #${esc(active.id.slice(0,8).toUpperCase())}</span><small>${esc(date(active.started_at))} 开始</small></div><p class="batch-description">${error?esc(control.error):active.phase==='observe'?`同步与备份稳定确认 ${Number(active.observations||0)} / 3 次，每次至少间隔 5 分钟。`:'本批成员已冻结，新发现的照片将在下一批处理。'}</p><div class="pipeline">${groups.map(([p,label],i)=>`<div class="step ${i<currentGroup?'done':i===currentGroup?'current':''}"><span class="step-dot">${i<currentGroup?'✓':i+1}</span><span class="step-label">${label}</span></div>`).join('')}</div><div class="batch-stats"><div class="batch-stat"><strong>${active.file_count==null?'—':num(active.file_count)}</strong><small>本批文件</small></div><div class="batch-stat"><strong>${active.backed_up==null?'—':num(active.backed_up)}</strong><small>整体备份确认</small></div><div class="batch-stat"><strong>${esc(elapsed(Date.now()/1000-(active.started_at||Date.now()/1000)))}</strong><small>本批已用时</small></div></div>${releaseButton(active.id,active.phase)}<div class="batch-bottom"><span>${active.next_check&&active.phase==='observe'?'下次确认不早于 '+esc(date(active.next_check,true)):'当前阶段：'+esc(active.phase_label)}</span><button class="text-link" data-batch="${esc(active.id)}">批次详情 ↗</button></div>`;
+ }else{$('batch-badge').className='badge green';$('batch-badge').textContent='当前无活动批次';$('active-batch').innerHTML=empty('正在等待下一批照片 · 源扫描独立运行');}
+ updateSyncProgress(run);updateBatchActions(run);
+}
 function overview(data){
- state.data=data;const inv=data.inventory,run=data.runtime,active=data.active;
+ const run=rememberRuntime(data.runtime);data.runtime=run;state.data=data;const inv=data.inventory;
  const removed=data.deletion_breakdown||{};
  const removedLines=[bytes(inv.deleted.bytes)+' 目标条目大小',...Object.entries({manual:'手动删除',syncthing:'同步删除',unknown:'来源未知'}).map(([key,label])=>{const group=removed[key]||{};return label+' '+num(group.files||0)+' 个 · '+bytes(group.bytes||0)})];
  $('metrics').innerHTML=[
@@ -127,13 +189,7 @@ function overview(data){
   ['已完成批次',num(data.batches.completed),'批','共 '+num(data.batches.total)+' 个历史批次','✓','green'],
   ['已移除目标',num(inv.deleted.files),'个',removedLines,'◷','purple']
  ].map(([label,value,unit,foot,icon,color])=>`<div class="metric${Array.isArray(foot)?' metric-deleted':''}"><div class="metric-top">${label}<span class="metric-symbol ${color}">${icon}</span></div><div class="metric-value">${value}<small>${unit}</small></div><div class="metric-foot"${Array.isArray(foot)?' title="按库存记录大小统计，不代表 NAS 实际释放空间"':''}>${Array.isArray(foot)?foot.map(line=>`<div>${esc(line)}</div>`).join(''):esc(foot)}</div></div>`).join('');
- if(active){
-  const index=phaseOrder.indexOf(active.phase),groups=[['mapping','映射'],['sync','同步'],['backup','备份'],['release','释放'],['observe','观察'],['final_sync','完成']];
-  const currentGroup=active.phase.startsWith('manual_')||active.phase==='release_uncertain'||active.phase==='deletions'?3:active.phase==='cleanup'?4:Math.max(0,groups.findIndex(([p])=>p===active.phase));
-  const control=run.controller||{},error=control.state==='error';
-  $('batch-badge').className='badge '+(error?'red':run.controller_stale?'amber':'blue');$('batch-badge').textContent=error?'异常 · 已暂停':run.controller_stale?'等待状态更新':active.phase_label;
-  $('active-batch').innerHTML=`<div class="batch-meta"><span class="batch-id">BATCH #${esc(active.id.slice(0,8).toUpperCase())}</span><small>${esc(date(active.started_at))} 开始</small></div><p class="batch-description">${error?esc(control.error):active.phase==='observe'?`同步与备份稳定确认 ${Number(active.observations||0)} / 3 次，每次至少间隔 5 分钟。`:'本批成员已冻结，新发现的照片将在下一批处理。'}</p><div class="pipeline">${groups.map(([p,label],i)=>`<div class="step ${i<currentGroup?'done':i===currentGroup?'current':''}"><span class="step-dot">${i<currentGroup?'✓':i+1}</span><span class="step-label">${label}</span></div>`).join('')}</div><div class="batch-stats"><div class="batch-stat"><strong>${num(active.file_count)}</strong><small>本批文件</small></div><div class="batch-stat"><strong>${active.backed_up==null?'—':num(active.backed_up)}</strong><small>整体备份确认</small></div><div class="batch-stat"><strong>${esc(elapsed(Date.now()/1000-(active.started_at||Date.now()/1000)))}</strong><small>本批已用时</small></div></div>${releaseButton(active.id,active.phase)}<div class="batch-bottom"><span>${active.next_check&&active.phase==='observe'?'下次确认不早于 '+esc(date(active.next_check,true)):'当前阶段：'+esc(active.phase_label)}</span><button class="text-link" data-batch="${esc(active.id)}">批次详情 ↗</button></div>`;
- }else{$('batch-badge').className='badge green';$('batch-badge').textContent='当前无活动批次';$('active-batch').innerHTML=empty('正在等待下一批照片 · 源扫描独立运行');}
+ renderActiveBatch(data.active,run);
  liveSections(run);
  $('recent').innerHTML=batchTable(data.recent,true);
  updateSyncProgress(run);
@@ -172,7 +228,7 @@ function batteryRow(battery){
  return ['▯','手机 电量',desc,label,valid?(battery.level<=20?'amber':battery.charging||battery.status==='full'?'green':'blue'):'neutral',battery.measured_at];
 }
 function liveSections(run){
- state.latestRuntime=run;
+ run=rememberRuntime(run);
  const sync=run.syncthing||{},photos=run.photos||{},storage=run.storage||{},ctrl=run.controller||{};
  const health=[
   ['▱','NAS 存储','源目录与目标目录所在的 NFS',storage.state==='mounted'?'已挂载':storage.state==='error'?'挂载异常':'未检查',storage.state==='mounted'?'green':storage.state==='error'?'red':'neutral',storage.checked_at],
@@ -299,7 +355,7 @@ document.addEventListener('keydown',event=>{if(event.key==='Escape')hidePhotoPre
 
 function openDrawer(){hidePhotoPreview();state.detailPreviewController?.abort();state.drawerVersion++;state.drawerOpener=document.activeElement;$('drawer-overlay').hidden=false;$('drawer').hidden=false;$('drawer-content').innerHTML='<div class="loading-state">正在读取详情…</div>';document.body.style.overflow='hidden';$('close-drawer').focus();return state.drawerVersion;}
 function closeDrawer(){state.detailPreviewController?.abort();state.drawerVersion++;$('drawer-overlay').hidden=true;$('drawer').hidden=true;document.body.style.overflow='';state.drawerOpener?.focus();}
-async function batchDetail(id){const version=openDrawer();try{const row=await api('/api/batches/'+encodeURIComponent(id));if($('drawer').hidden||version!==state.drawerVersion)return;const durations={...row.phase_seconds};if(row.phase!=='complete'&&row.phase_started_at)durations[row.phase]=(durations[row.phase]||0)+Math.max(0,Date.now()/1000-row.phase_started_at);const maximum=Math.max(1,...Object.values(durations).map(Number));$('drawer-content').innerHTML=`<h2 id="drawer-title">批次详情 ${phaseBadge(row)}</h2><div class="mono">${esc(row.id)}</div><div class="detail-grid">${detailItem('开始时间',date(row.started_at))}${detailItem('结束时间',row.ended_at?date(row.ended_at):'正在进行')}${detailItem('本批文件',num(row.file_count)+' 个')}${detailItem('整体备份确认',row.backed_up==null?'未记录':num(row.backed_up)+' 个')}${detailItem('手动删除成功',row.manual_deleted==null?'未记录':num(row.manual_deleted)+' 个')}${detailItem('同步删除数量',row.syncthing_deleted==null?'未记录':num(row.syncthing_deleted)+' 个')}${detailItem('页面标记删除',num(row.user_skipped_count)+' 个')}${detailItem('本批跳过待手动处理',num(row.manual_retained_count)+' 个')}${detailItem('跳过或变化待核查',num(row.deferred)+' 个')}${detailItem('观察次数',num(row.observations)+' / 3')}${detailItem('总耗时',row.started_at?elapsed((row.ended_at||Date.now()/1000)-row.started_at):'未记录')}</div><div class="detail-note">备份数按相册整体完成状态确认，不代表本轮新增上传量。${row.timing_partial?' 此批在统计升级前已开始，历史阶段耗时没有补造。':''}</div>${releaseButton(row.id,row.phase)}<h3>各阶段耗时 <span class="subtle">含等待与重启间隔</span></h3>${Object.entries(phaseLabels).filter(([p])=>p!=='complete').map(([p,label])=>`<div class="phase-time-row"><span>${label}</span><div class="phase-time-track"><div class="phase-time-bar" style="width:${Math.max(0,Math.min(100,Number(durations[p]||0)/maximum*100))}%"></div></div><span>${elapsed(durations[p]||0)}</span></div>`).join('')}<button class="primary-button" data-batch-files="${esc(row.id)}">查看本批文件 ↗</button>${row.summary?.body?`<h3>批次完成报告</h3><div class="detail-note">${esc(row.summary.body)}</div>`:''}`;}catch(error){if(version===state.drawerVersion)$('drawer-content').innerHTML=empty(error.message);}}
+async function batchDetail(id){const version=openDrawer();try{const row=await api('/api/batches/'+encodeURIComponent(id));if($('drawer').hidden||version!==state.drawerVersion)return;const durations={...row.phase_seconds};if(row.phase!=='complete'&&row.phase_started_at)durations[row.phase]=(durations[row.phase]||0)+Math.max(0,Date.now()/1000-row.phase_started_at);const maximum=Math.max(1,...Object.values(durations).map(Number));$('drawer-content').innerHTML=`<h2 id="drawer-title">批次详情 <span data-live-phase="${esc(row.id)}">${phaseBadge(row)}</span></h2><div class="mono">${esc(row.id)}</div><div class="detail-grid">${detailItem('开始时间',date(row.started_at))}${detailItem('结束时间',row.ended_at?date(row.ended_at):'正在进行')}${detailItem('本批文件',num(row.file_count)+' 个')}${detailItem('整体备份确认',row.backed_up==null?'未记录':num(row.backed_up)+' 个')}${detailItem('手动删除成功',row.manual_deleted==null?'未记录':num(row.manual_deleted)+' 个')}${detailItem('同步删除数量',row.syncthing_deleted==null?'未记录':num(row.syncthing_deleted)+' 个')}${detailItem('页面标记删除',num(row.user_skipped_count)+' 个')}${detailItem('本批跳过待手动处理',num(row.manual_retained_count)+' 个')}${detailItem('跳过或变化待核查',num(row.deferred)+' 个')}${detailItem('观察次数',num(row.observations)+' / 3')}${detailItem('总耗时',row.started_at?elapsed((row.ended_at||Date.now()/1000)-row.started_at):'未记录')}</div><div class="detail-note">备份数按相册整体完成状态确认，不代表本轮新增上传量。${row.timing_partial?' 此批在统计升级前已开始，历史阶段耗时没有补造。':''}</div>${releaseButton(row.id,row.phase)}<h3>各阶段耗时 <span class="subtle">含等待与重启间隔</span></h3>${Object.entries(phaseLabels).filter(([p])=>p!=='complete').map(([p,label])=>`<div class="phase-time-row"><span>${label}</span><div class="phase-time-track"><div class="phase-time-bar" style="width:${Math.max(0,Math.min(100,Number(durations[p]||0)/maximum*100))}%"></div></div><span>${elapsed(durations[p]||0)}</span></div>`).join('')}<button class="primary-button" data-batch-files="${esc(row.id)}">查看本批文件 ↗</button>${row.summary?.body?`<h3>批次完成报告</h3><div class="detail-note">${esc(row.summary.body)}</div>`:''}`;}catch(error){if(version===state.drawerVersion)$('drawer-content').innerHTML=empty(error.message);}}
 async function fileDetail(id){const version=openDrawer();try{const row=await api('/api/files/'+Number(id));if($('drawer').hidden||version!==state.drawerVersion)return;$('drawer-content').innerHTML=`<h2 id="drawer-title">${esc(row.source_path.split('/').pop())}</h2><div class="mono">${esc(row.source_path)}</div><div id="detail-photo" class="detail-photo" role="status">正在加载预览…</div><div class="detail-grid">${detailItem('文件大小',bytes(row.size_bytes))}${detailItem('目标状态',statusLabel[row.status]||row.status)}${detailItem('备份确认方式',backupLabel[row.backup_state]||row.backup_state)}${detailItem('源库存状态',row.source_present?'最近扫描存在':'最近扫描未发现')}${detailItem('拍摄时间',captureDate(row))}${detailItem('源修改时间',row.mtime_ns?date(Number(row.mtime_ns)/1e9):'未记录')}${detailItem('建立链接时间',date(row.linked_at))}${detailItem('检测删除时间',date(row.deleted_at))}${detailItem('删除来源',originLabel[row.deletion_origin]||row.deletion_origin)}</div>${row.last_error?`<div class="detail-note">${esc(row.last_error)}</div>`:''}${row.batch_id?`<button class="text-link" data-batch="${esc(row.batch_id)}">所属批次 ${esc(row.batch_id.slice(0,8).toUpperCase())} ↗</button>`:''}<h3>相关删除审计</h3>${row.audits.length?row.audits.map(a=>`<div class="event"><span class="event-dot ${a.state==='deleted'?'green':''}"></span><div class="event-text">${esc(originLabel[a.origin]||a.origin)} · ${esc(statusLabel[a.state]||a.state)}<br>${esc(reasonLabel[a.reason]||(String(a.reason||'').startsWith('remote_tombstone:')?'Pixel 端删除证据':a.reason)||'无附加说明')}${a.error_message?'<br>'+esc(a.error_message):''}<span class="event-time">#${Number(a.id)} · ${esc(date(a.created_at))}</span></div></div>`).join(''):empty('此文件尚无删除审计')}`;loadDetailPreview(id,version);}catch(error){if(version===state.drawerVersion)$('drawer-content').innerHTML=empty(error.message);}}
 const viewCopy={settings:['运行配置','按你的节奏，安排备份。','调整同步参数，保存后自动应用并持久保留。'],overview:['同步总览','每一份回忆，都妥善保存。','从 NAS 到 Pixel，再到云端，查看照片同步与备份的每一步。'],batches:['批次历史','回看每一批，保存每一步。','从开始到结束，查看备份结果与各阶段累计耗时。'],files:['文件明细','每一个文件，都有迹可循。','从待处理到备份完成，检索照片路径与库存状态。'],audits:['删除审计','清理目标空间，保留源照片。','核对删除来源、执行结果，以及每次清理留下的审计记录。']};
 async function changeView(){hidePhotoPreview();
@@ -311,22 +367,17 @@ async function changeView(){hidePhotoPreview();
 }
 function refreshOverview(){
  if(state.overviewPending)return state.overviewPending;
- const work=api('/api/overview',{cacheMs:0}).then(data=>{state.data=data;if(state.view==='overview')overview(data);});
+ const work=api('/api/overview',{cacheMs:0}).then(data=>{data.runtime=rememberRuntime(data.runtime);state.data=data;if(state.view==='overview')overview(data);});
  state.overviewPending=work.finally(()=>{state.overviewPending=null;});return state.overviewPending;
 }
 function refreshRuntime(){
  if(state.runtimePending)return state.runtimePending;
  const work=api('/api/runtime',{cacheMs:0}).then(data=>{
-  const run=data.runtime;
+  const run=rememberRuntime(data.runtime);
+  if(state.data)state.data.runtime=run;
   if(state.view==='overview'){
-   liveSections(run);
-   if(!state.data&&run.controller?.batch_id&&run.controller.phase!=='complete'){
-    const ctrl=run.controller,label=phaseLabels[ctrl.phase]||ctrl.phase;
-    $('batch-badge').className='badge '+(ctrl.state==='error'?'red':'blue');$('batch-badge').textContent=label;
-    $('active-batch').innerHTML=`<div class="batch-meta"><span class="batch-id">BATCH #${esc(ctrl.batch_id.slice(0,8).toUpperCase())}</span></div><p class="batch-description">当前阶段：${esc(label)}。文件数量与耗时正在读取，设备状态已可查看。</p><button class="text-link" data-batch="${esc(ctrl.batch_id)}">批次详情 ↗</button>`;
-   }
-  }
-  if(state.view==='overview')updateSyncProgress(run);
+   liveSections(run);renderActiveBatch(state.data?.active,run);
+  }else updateBatchActions(run);
   runtimeNotice(run);
   if(state.view==='overview'&&$('error-banner').hidden&&state.data?.inventory_updated_at&&Date.now()/1000-state.data.inventory_updated_at>30)banner('库存统计正在更新；设备状态按最近检查结果显示。');
   $('updated').textContent='最近更新 '+date(data.time)+(state.view==='overview'&&state.data?.inventory_updated_at?' · 库存统计 '+ago(state.data.inventory_updated_at):'');
@@ -375,7 +426,7 @@ $('settings-form').addEventListener('submit',async event=>{
  }catch(error){$('settings-message').textContent=error.message;}
  finally{settingsSaving=false;$('settings-save').disabled=false;$('settings-reload').disabled=false;}
 });
-$('refresh').addEventListener('click',()=>{state.apiCache.clear();refresh({background:false});});window.addEventListener('hashchange',changeView);changeView();setInterval(()=>{if(!document.hidden)refresh();},10000);document.addEventListener('visibilitychange',()=>{if(!document.hidden)refresh();});
+$('refresh').addEventListener('click',()=>{state.apiCache.clear();refresh({background:false});});window.addEventListener('hashchange',changeView);changeView();setInterval(()=>{if(!document.hidden)refresh();},10000);setInterval(()=>{if(!document.hidden)refreshRuntime().catch(()=>{});},2000);document.addEventListener('visibilitychange',()=>{if(!document.hidden)refresh();});
 
 $('scan-start').addEventListener('click',async()=>{
  state.scanSubmitting=true;$('scan-start').disabled=true;$('scan-feedback').textContent='正在请求扫描…';

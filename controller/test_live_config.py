@@ -86,6 +86,14 @@ class LiveConfigTests(unittest.TestCase):
         c.save.assert_called_once()
         self.assertEqual(c.config_revision, live.read()[1])
 
+    def test_committed_manual_command_interrupts_monitor_wait(self):
+        c = self.controller()
+        c.manual_action_pending = threading.Event()
+        c.manual_action_pending.set()
+        with patch.object(c.stop,'wait') as wait, patch('file_sync.live_config.read',side_effect=AssertionError('persisted action must wake first')):
+            self.assertFalse(c.wait_settings(60))
+            wait.assert_not_called()
+
     def test_malformed_external_file_preserves_effective_config(self):
         c = self.controller()
         self.path.write_text('[mapping\n')

@@ -1,4 +1,4 @@
-import queue
+import threading
 import unittest
 from contextlib import nullcontext
 from unittest.mock import Mock, patch
@@ -9,8 +9,8 @@ class ManualReleaseTests(unittest.TestCase):
     def controller(self, phase='backup'):
         c = Controller.__new__(Controller)
         c.round = dict(id='batch', phase=phase, members={'large.mp4': [1,2,3,4]})
-        c.release_requests = queue.Queue(maxsize=1)
-        c.delete_requests = queue.Queue(maxsize=1)
+        c.manual_action_pending = threading.Event()
+        c.database, c.connection = 'isolated', {}
         c.observation = Observation()
         c.c = load()
         c.source, c.target = '/source', '/target'
@@ -33,20 +33,51 @@ class ManualReleaseTests(unittest.TestCase):
         with patch('file_sync.ensure_storage'), patch('file_sync.TargetDirectory'):
             return c.tick()
 
-    def test_request_validation_duplicate_and_incomplete_sync(self):
-        c = self.controller()
-        self.assertEqual(c.request_release('stale')[1], 409)
-        self.assertEqual(c.request_release('batch')[1], 202)
-        self.assertEqual(c.request_release('batch')[1], 409)
-        c.sync_status.return_value['ready'] = False
-        with self.assertRaisesRegex(Exception, '同步尚未完成'):
-            self.tick(c)
+    def test_request_commits_with_own_connection_before_acknowledging(self):
+        c=self.controller()
+        requested=dict(c.round,phase='manual_release_requested',manual_command={'id':'request','kind':'release','requested_at':1})
+        with patch('file_sync.Inventory') as factory,patch('file_sync.BatchStore') as store:
+            store.return_value.request_manual_action.return_value=requested
+            response,status=c.request_release('batch')
+            self.assertEqual(status,202)
+            self.assertTrue(response['persisted'])
+            self.assertEqual(response['phase'],'manual_release_requested')
+            factory.assert_called_once_with('isolated',initialize=False)
+            store.return_value.request_manual_action.assert_called_once_with('batch','release',None,None)
+            factory.return_value.close.assert_called_once()
+            self.assertEqual(c.round['phase'],'backup')
+            self.assertTrue(c.manual_action_pending.is_set())
+
+    def test_in_progress_release_rejects_duplicate_without_database_write(self):
+        c=self.controller('manual_release_uncertain')
+        c.release_running=threading.Event();c.release_running.set()
+        with patch('file_sync.Inventory') as factory:
+            self.assertEqual(c.request_release('batch')[1],409)
+            factory.assert_not_called()
+
+    def test_main_adopts_committed_command_and_acknowledges_current_stage(self):
+        c=self.controller()
+        c.manual_action_pending.set()
+        requested=dict(c.round,phase='manual_release_requested',manual_command={'id':'new','requested_at':1})
+        with patch('file_sync.BatchStore') as store:
+            store.return_value.active.return_value=requested
+            c.reload_manual_action()
+        self.assertEqual(c.round['phase'],'manual_release_requested')
+        self.assertFalse(c.manual_action_pending.is_set())
+        self.assertEqual(c.publish.call_args.kwargs['manual_command_id'],'new')
+
+    def test_requested_release_waits_for_sync_and_survives_restart(self):
+        c=self.controller('manual_release_requested')
+        c.sync_status.return_value['ready']=False
+        self.tick(c)
+        self.assertEqual(c.round['phase'],'manual_release_requested')
         c.phone_call.assert_not_called()
-        self.assertEqual(c.round['phase'], 'backup')
+        c.sync_status.return_value['ready']=True
+        self.tick(c)
+        self.assertEqual(c.round['phase'],'manual_release_sync')
 
     def test_partial_release_waits_for_user_selection_and_never_cleans(self):
-        c = self.controller()
-        c.request_release('batch')
+        c = self.controller('manual_release_requested')
         self.tick(c)
         c.phone_call.assert_called_once_with('release_space', execute=True, allow_incomplete=True)
         self.assertEqual(c.round['phase'], 'manual_release_sync')
@@ -65,11 +96,9 @@ class ManualReleaseTests(unittest.TestCase):
         with self.assertRaises(PhoneUnavailable):
             self.tick(c)
         c.phone_call.assert_not_called()
-        self.assertEqual(c.request_release('batch')[1], 202)
 
     def test_click_failure_leaves_persistent_uncertainty(self):
-        c = self.controller()
-        c.request_release('batch')
+        c = self.controller('manual_release_requested')
         c.phone_call.side_effect = RuntimeError('lost response')
         with self.assertRaises(RuntimeError):
             self.tick(c)
@@ -94,19 +123,10 @@ class ManualReleaseTests(unittest.TestCase):
         c.round.update(manual_remaining={'large.mp4': [1,2,3,4]}, manual_review_revision='revision', manual_review_sync_token=[1])
         return c
 
-    def test_selection_validates_revision_members_and_duplicate_request(self):
-        c = self.review()
-        self.assertEqual(c.request_selected_delete('batch', 'stale', ['large.mp4'])[1], 409)
-        self.assertEqual(c.request_selected_delete('batch', 'revision', ['other.mp4'])[1], 409)
-        self.assertEqual(c.request_selected_delete('batch', 'revision', [1])[1], 400)
-        self.assertEqual(c.request_selected_delete('batch', 'revision', [])[1], 400)
-        self.assertEqual(c.request_selected_delete('batch', 'revision', ['large.mp4'])[1], 202)
-        self.assertEqual(c.request_selected_delete('batch', 'revision', ['large.mp4'])[1], 409)
-
     def test_selected_deletion_is_journaled_and_waits_for_phone_sync(self):
         c = self.review()
         c.db.delete_user_selected_targets.return_value = [{'file':'large.mp4','action':'deleted'}]
-        c.request_selected_delete('batch','revision',['large.mp4'])
+        c.round.update(phase='manual_delete_requested',manual_delete_selection={'large.mp4':[1,2,3,4]})
         self.tick(c)
         self.assertEqual(c.round['phase'], 'manual_delete_sync')
         c.db.delete_user_selected_targets.assert_called_once()
@@ -130,7 +150,7 @@ class ManualReleaseTests(unittest.TestCase):
 
     def test_changed_selected_file_is_kept(self):
         c = self.review()
-        c.request_selected_delete('batch','revision',['large.mp4'])
+        c.round.update(phase='manual_delete_requested',manual_delete_selection={'large.mp4':[1,2,3,4]})
         c.batch_snapshot.return_value = {'large.mp4':[1,2,30,4]}
         with self.assertRaises(PhoneUnavailable):self.tick(c)
         c.db.delete_user_selected_targets.assert_not_called()

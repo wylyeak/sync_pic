@@ -3,7 +3,7 @@ import json
 import os
 import unittest
 from unittest.mock import patch
-from batch_store import BatchStore, split_files, dumps
+from batch_store import BatchStore, split_files, dumps, ManualCommandPending, ManualCommandConflict
 import test_storage as storage_tests
 
 
@@ -32,6 +32,36 @@ class BatchStoreTest(unittest.TestCase):
             mapping_skipped={'b.jpg':'changed'},phase_seconds={'sync':21.5,'backup':6},
             release={'action':'nothing_to_free'},removed_count=0,
             cleanup_results=[{'file':'b.jpg','action':'changed_kept'},{'file':'a.jpg','action':'already_missing'}])
+
+    def test_release_request_commits_immediately_and_blocks_old_snapshot_overwrite(self):
+        from storage import Inventory
+        store=BatchStore(self.db);store.migrate();old=self.batch();old['phase']='backup';store.save(old)
+        writer=Inventory(self.database,initialize=False,**self.settings)
+        self.addCleanup(writer.close)
+        requested=BatchStore(writer).request_manual_action(old['id'],'release')
+        # A separate connection sees the committed stage before the main loop runs.
+        self.assertEqual(store.load(old['id'])['phase'],'manual_release_requested')
+        self.assertEqual(store.load(old['id'])['manual_command']['id'],requested['manual_command']['id'])
+        with self.assertRaises(ManualCommandPending):store.save(old)
+        self.assertEqual(store.load(old['id'])['phase'],'manual_release_requested')
+        with self.assertRaises(ManualCommandConflict):BatchStore(writer).request_manual_action(old['id'],'release')
+        resumed=BatchStore(self.db).active()
+        self.assertEqual(resumed['phase'],'manual_release_requested')
+        resumed['phase']='manual_release_uncertain';store.save(resumed)
+        self.assertEqual(store.load(old['id'])['phase'],'manual_release_uncertain')
+
+    def test_selected_delete_is_persisted_before_execution_and_rejects_stale_list(self):
+        store=BatchStore(self.db);store.migrate();batch=self.batch();batch.update(phase='manual_review',deferred=[],manual_remaining={'a.jpg':[1,2,3,4]},manual_review_revision='review')
+        store.save(batch)
+        with self.assertRaises(ManualCommandConflict):store.request_manual_action(batch['id'],'delete','stale',['a.jpg'])
+        with self.assertRaises(ManualCommandConflict):store.request_manual_action(batch['id'],'delete','review',['outside.jpg'])
+        requested=store.request_manual_action(batch['id'],'delete','review',['a.jpg'])
+        reread=BatchStore(self.db).load(batch['id'])
+        self.assertEqual(reread['phase'],'manual_delete_requested')
+        self.assertEqual(reread['manual_delete_selection'],{'a.jpg':[1,2,3,4]})
+        self.assertEqual(reread['manual_command'],requested['manual_command'])
+        self.assertFalse(self.db.query('SELECT id FROM deletion_events'))
+        with self.assertRaises(ManualCommandPending):store.save(batch)
 
     def legacy(self, batch):
         self.db.execute('''CREATE TABLE IF NOT EXISTS controller_rounds (

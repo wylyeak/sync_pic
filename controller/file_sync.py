@@ -27,7 +27,7 @@ from configuration import load, redacted
 import live_config
 import config_service
 from batch_report import PHASES, transition, summary
-from batch_store import BatchStore
+from batch_store import BatchStore, ManualCommandPending, ManualCommandConflict
 from telemetry import Telemetry
 from storage import Inventory, DatabaseError, now, file_path, path_key
 from cleanup_target import fingerprint
@@ -126,8 +126,8 @@ class Controller:
         self.events = queue.SimpleQueue()
         self.scan_lock = threading.Lock()
         self.scan_requested = threading.Event()
-        self.release_requests = queue.Queue(maxsize=1)
-        self.delete_requests = queue.Queue(maxsize=1)
+        self.manual_action_pending = threading.Event()
+        self.release_running = threading.Event()
         self.scan_running = False
         self.source, self.target = config['directories']['source'], config['directories']['target']
         self.connection = {k: config['mysql'][k] for k in ('host', 'port', 'user')}
@@ -179,34 +179,54 @@ class Controller:
             self.scan_requested.set()
         return dict(accepted=True), 202
 
-    def request_release(self, batch_id):
-        batch = self.round
-        if not batch or batch['id'] != batch_id or batch['phase'] not in ('backup', 'manual_release_uncertain'):
-            return dict(error='批次已变化或当前阶段不能跳到释放'), 409
+    def request_manual_action(self, batch_id, kind, revision=None, files=None):
+        # Request threads borrow their own connection; never share the main
+        # controller connection or mutate its in-flight batch object.
+        busy = getattr(self, 'release_running', None)
+        if kind == 'release' and busy is not None and busy.is_set():
+            return dict(error='释放操作正在执行，请等待结果'), 409
+        db = Inventory(self.database, initialize=False, **self.connection)
         try:
-            self.release_requests.put_nowait(batch_id)
-        except queue.Full:
-            return dict(error='释放请求已在等待处理'), 409
-        return dict(accepted=True), 202
+            batch = BatchStore(db).request_manual_action(batch_id, kind, revision, files)
+        except ManualCommandConflict as exc:
+            return dict(error=str(exc)), 409
+        except ValueError as exc:
+            return dict(error=str(exc)), 400
+        finally:
+            db.close()
+        self.manual_action_pending.set()
+        self.publish('actions', manual_command=dict(batch_id=batch_id, phase=batch['phase'], **batch['manual_command']))
+        result = dict(accepted=True, persisted=True, batch_id=batch_id, phase=batch['phase'],
+                      request_id=batch['manual_command']['id'], requested_at=batch['manual_command']['requested_at'])
+        if kind == 'delete':
+            result['selected'] = len(files)
+        return result, 202
+
+    def request_release(self, batch_id):
+        return self.request_manual_action(batch_id, 'release')
 
     def request_selected_delete(self, batch_id, revision, files):
-        batch = self.round
-        if (not batch or batch['id'] != batch_id or batch['phase'] != 'manual_review'
-                or batch.get('manual_review_revision') != revision):
-            return dict(error='残留列表已变化，请刷新后重新选择'), 409
-        if (type(files) is not list or not 0 < len(files) <= 2000
-                or any(not isinstance(name, str) for name in files) or len(set(files)) != len(files)):
-            return dict(error='请选择 1–2000 个不同的文件'), 400
-        remaining = batch.get('manual_remaining', {})
-        if any(name not in remaining or remaining[name] != batch['members'].get(name)
-               or name in batch.get('deferred', []) for name in files):
-            return dict(error='选择包含已变化或非本批残留文件'), 409
-        selection = {name: remaining[name] for name in files}
-        try:
-            self.delete_requests.put_nowait((batch_id, revision, copy.deepcopy(selection)))
-        except queue.Full:
-            return dict(error='已有删除请求等待处理'), 409
-        return dict(accepted=True, selected=len(files)), 202
+        return self.request_manual_action(batch_id, 'delete', revision, files)
+
+    def reload_manual_action(self, force=False):
+        pending = getattr(self, 'manual_action_pending', None)
+        if pending is None and not force:
+            return
+        changed = force or pending.is_set()
+        if self.round and not changed:
+            rows = self.db.query("SELECT JSON_UNQUOTE(JSON_EXTRACT(extra,'$.manual_command.id')) command_id FROM backup_batches WHERE id=%s", (self.round['id'],))
+            changed = bool(rows and rows[0]['command_id'] != self.round.get('manual_command', {}).get('id'))
+        if changed:
+            if pending is not None:
+                pending.clear()
+            self.batches = BatchStore(self.db)
+            self.round = self.batches.active()
+            self.observation.reset()
+            if self.round:
+                self.publish('controller', batch_id=self.round['id'], phase=self.round['phase'], observations=0,
+                             manual_command_id=self.round.get('manual_command', {}).get('id'),
+                             manual_command_requested_at=self.round.get('manual_command', {}).get('requested_at', 0),
+                             state='checking', error=None)
 
     def wait_scan(self):
         started = time.monotonic()
@@ -226,6 +246,8 @@ class Controller:
     def wait_settings(self, delay):
         deadline = time.monotonic() + delay
         while not self.stop.is_set():
+            if getattr(self, 'manual_action_pending', None) is not None and self.manual_action_pending.is_set():
+                return False
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 return False
@@ -393,7 +415,9 @@ class Controller:
             self.round = previous
             self.observation.__dict__.update(observation)
             raise
-        self.publish('controller', batch_id=self.round['id'], phase=self.round['phase'], observations=self.observation.count)
+        self.publish('controller', batch_id=self.round['id'], phase=self.round['phase'], observations=self.observation.count,
+                     manual_command_id=self.round.get('manual_command', {}).get('id'),
+                     manual_command_requested_at=self.round.get('manual_command', {}).get('requested_at', 0))
         log.info('round=%s phase=%s observations=%d', self.round['id'], self.round['phase'], self.observation.count)
 
     def flush_batch_reports(self):
@@ -612,28 +636,6 @@ class Controller:
                 return min(60, self.c['monitor']['interval'])
             if not self.new_round():
                 return self.c['monitor']['idle_interval']
-        requests = getattr(self, 'release_requests', None)
-        if requests is not None and not requests.empty():
-            requested = requests.get_nowait()
-            if requested == self.round['id'] and self.round['phase'] in ('backup', 'manual_release_uncertain'):
-                if not before['ready']:
-                    raise SyncthingUnavailable('同步尚未完成，请同步完成后重新请求释放')
-                self.round['manual_release_requested_at'] = time.time()
-                self.save('manual_release')
-        execute_selected_delete = False
-        deletions = getattr(self, 'delete_requests', None)
-        if deletions is not None and not deletions.empty():
-            batch_id, revision, selection = deletions.get_nowait()
-            if (batch_id != self.round['id'] or self.round['phase'] != 'manual_review'
-                    or self.round.get('manual_review_revision') != revision):
-                raise PhoneUnavailable('删除请求已过期，请刷新残留列表重新选择')
-            if not before['ready'] or before['token'] != self.round.get('manual_review_sync_token'):
-                self.save('manual_release_sync')
-                raise SyncthingUnavailable('同步状态已变化，请等待残留列表重新确认后再删除')
-            self.round['manual_delete_selection'] = selection
-            self.round['manual_delete_requested_at'] = time.time()
-            self.save('manual_delete')
-            execute_selected_delete = True
         phase = self.round['phase']
         if phase == 'mapping':
             return 1 if self.map_round() else min(60, self.c['monitor']['interval'])
@@ -657,13 +659,20 @@ class Controller:
             self.observation.reset()
             self.save()
             return self.c['monitor']['interval']
-        if phase == 'manual_release':
-            # Persist ambiguity before any UI click; never replay after restart.
-            self.save('manual_release_uncertain')
-            with self.device():
-                result = self.phone_call('release_space', execute=True, allow_incomplete=True)
-            self.round['release'] = result
-            self.save('manual_release_sync' if result['action'] in ('freed', 'nothing_to_free') else 'manual_release_uncertain')
+        if phase in ('manual_release_requested', 'manual_release'):
+            busy = getattr(self, 'release_running', None)
+            if busy is not None:
+                busy.set()
+            try:
+                # Persist ambiguity before clicking; no replay after restart.
+                self.save('manual_release_uncertain')
+                with self.device():
+                    result = self.phone_call('release_space', execute=True, allow_incomplete=True)
+                self.round['release'] = result
+                self.save('manual_release_sync' if result['action'] in ('freed', 'nothing_to_free') else 'manual_release_uncertain')
+            finally:
+                if busy is not None:
+                    busy.clear()
         elif phase == 'manual_release_uncertain':
             raise PhoneUnavailable('手动释放结果待确认；请检查相册后在页面重新请求释放')
         elif phase == 'manual_release_sync':
@@ -690,13 +699,17 @@ class Controller:
             elif (current != self.round.get('manual_remaining')
                     or before['token'] != self.round.get('manual_review_sync_token')):
                 self.save('manual_release_sync')
-        elif phase == 'manual_delete':
-            if not execute_selected_delete:
+        elif phase in ('manual_delete_requested', 'manual_delete'):
+            if phase == 'manual_delete':
                 # Interrupted deletion is never replayed. Reconcile intents,
                 # refresh the list and require a new user selection.
                 self.reconcile_intents()
                 self.save('manual_release_sync')
             else:
+                if before['token'] != self.round.get('manual_review_sync_token'):
+                    self.save('manual_release_sync')
+                    raise SyncthingUnavailable('同步状态已变化，请等待残留列表重新确认后再删除')
+                self.save('manual_delete')
                 current = self.batch_snapshot()
                 after = self.sync_status()
                 if not after['ready'] or before['token'] != after['token']:
@@ -809,6 +822,7 @@ class Controller:
             while not self.stop.is_set():
                 tick_started = time.monotonic()
                 try:
+                    self.reload_manual_action()
                     self.reload_settings()
                     failures.threshold = self.c['bark']['error_threshold']
                     self.publish('controller', state='checking')
@@ -833,6 +847,9 @@ class Controller:
                         failure = None
                 except Stopped:
                     break
+                except ManualCommandPending:
+                    self.reload_manual_action(force=True)
+                    delay = 0
                 except Exception as exc:
                     self.observation.reset()
                     failure = type(exc).__name__

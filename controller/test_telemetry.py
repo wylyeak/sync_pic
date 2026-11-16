@@ -31,4 +31,11 @@ class TelemetryTests(unittest.TestCase):
             self.assertEqual(len(restored.data['events']),50)
             self.assertEqual(restored.data['events'][0]['message'],'5')
 
+    def test_delayed_command_publication_cannot_replace_newer_command(self):
+        with tempfile.TemporaryDirectory() as root:
+            t=Telemetry(Path(root,'runtime.json'))
+            t.update('actions',manual_command={'id':'new','requested_at':20})
+            t.update('actions',manual_command={'id':'old','requested_at':10})
+            self.assertEqual(t.data['actions']['manual_command']['id'],'new')
+
 if __name__=='__main__': unittest.main()

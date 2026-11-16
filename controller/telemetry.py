@@ -17,6 +17,10 @@ class Telemetry:
 
     def update(self, section, **values):
         with self.lock:
+            if section == 'actions' and 'manual_command' in values:
+                old = self.data.get('actions', {}).get('manual_command', {})
+                if old.get('requested_at', 0) > values['manual_command'].get('requested_at', 0):
+                    return
             self.data.setdefault(section, {}).update(values, checked_at=time.time())
             self._save()
 

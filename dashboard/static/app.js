@@ -110,7 +110,8 @@ function actionMarkup(id,phase){
  if(pending)return `<button class="primary-button" disabled>${pending.status==='sending'?'正在提交…':pending.status==='unknown'?'请求结果待核对':'已提交 · 等待处理'}</button><p class="subtle" role="status">${pending.status==='sending'?'正在提交释放请求…':pending.status==='unknown'?'请求响应超时或连接中断，正在核对最新状态，请勿重复提交。':'释放请求已接受，当前检查完成后开始处理。'}</p>`;
  if(phase==='manual_release_uncertain'&&state.latestRuntime?.controller?.batch_id===id&&!['waiting','error'].includes(state.latestRuntime.controller.state))return '<p class="subtle" role="status">正在执行相册释放，请等待结果…</p>';
  if(phase==='manual_review')return `<button class="primary-button" data-review="${esc(id)}">查看残留并标记删除</button><p class="subtle">释放和删除同步已确认，请选择要删除的残留文件；源原片保留。</p>`;
- return ['backup','manual_release_uncertain'].includes(phase)?`<button class="primary-button" data-release="${esc(id)}">跳到释放阶段</button><p class="subtle">先释放已备份内容并同步删除，再由你在页面标记残留文件删除。</p>`:'';
+ if(phase==='manual_release_uncertain')return `<button class="primary-button" data-release="${esc(id)}">重新尝试释放</button><p class="subtle">已进入释放阶段，但上次释放结果尚未确认。请先检查手机相册，再决定是否重试。</p>`;
+ return phase==='backup'?`<button class="primary-button" data-release="${esc(id)}">跳到释放阶段</button><p class="subtle">先释放已备份内容并同步删除，再由你在页面标记残留文件删除。</p>`:'';
 }
 function releaseButton(id,phase){
  const ctrl=state.latestRuntime?.controller;
@@ -120,8 +121,9 @@ function releaseButton(id,phase){
 async function requestRelease(id){
  state.releasePending??=new Map();
  if(state.releaseSubmitting||state.releasePending.has(id))return;
- if(!window.confirm('跳过本批剩余备份，立即让 Google 相册释放已安全备份的内容？\n\n释放并同步删除后，将列出残留文件，由你在页面勾选删除。不会把残留标为已备份。相册释放范围可能包含其他已备份内容。'))return;
  const ctrl=state.latestRuntime?.controller||{};
+ const retry=ctrl.batch_id===id&&ctrl.phase==='manual_release_uncertain';
+ if(!window.confirm((retry?'上次释放结果尚未确认。检查手机相册后，确定重新尝试释放已安全备份的内容？':'跳过本批剩余备份，立即让 Google 相册释放已安全备份的内容？')+'\n\n释放并同步删除后，将列出残留文件，由你在页面勾选删除。不会把残留标为已备份。相册释放范围可能包含其他已备份内容。'))return;
  const pending={status:'sending',phase:ctrl.phase||state.data?.active?.phase||'backup',startedAt:ctrl.started_at,checkedAt:ctrl.checked_at};
  state.releasePending.set(id,pending);state.releaseSubmitting=true;
  updateBatchActions(state.latestRuntime||{});

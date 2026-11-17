@@ -319,8 +319,12 @@ class Controller:
         try:
             return getattr(self.phone, operation)(*args, **kwargs)
         except PhotosNotResponding as exc:
+            if operation == 'status':
+                self.publish('photos', read_error=str(exc))
             raise PhoneUnavailable(str(exc)) from None
         except Exception as exc:
+            if operation == 'status':
+                self.publish('photos', read_error=type(exc).__name__)
             raise PhoneUnavailable('手机连接或相册界面异常：' + type(exc).__name__) from None
 
     def refresh_battery(self):
@@ -372,7 +376,7 @@ class Controller:
             self.battery_gate_ready = True
 
     def photos_status(self, status):
-        self.publish('photos', **status)
+        self.publish('photos', **status, observed_at=time.time(), read_error=None)
         if status['state'] not in ('complete', 'syncing'):
             detail = '；'.join(status.get('details', []))[:300]
             raise PhoneUnavailable('手机相册异常：' + status.get('message', status['state']) + ('；' + detail if detail else ''))
@@ -665,6 +669,7 @@ class Controller:
                 busy.set()
             try:
                 # Persist ambiguity before clicking; no replay after restart.
+                self.publish('controller', release_running=True)
                 self.save('manual_release_uncertain')
                 with self.device():
                     result = self.phone_call('release_space', execute=True, allow_incomplete=True)
@@ -673,7 +678,12 @@ class Controller:
             finally:
                 if busy is not None:
                     busy.clear()
+                self.publish('controller', release_running=False)
         elif phase == 'manual_release_uncertain':
+            # Read-only observation must remain separate from release outcome.
+            with self.device():
+                status = self.phone_call('status')
+            self.publish('photos', **status, observed_at=time.time(), read_error=None)
             raise PhoneUnavailable('手动释放结果待确认；请检查相册后在页面重新请求释放')
         elif phase == 'manual_release_sync':
             current = self.batch_snapshot()
@@ -825,7 +835,7 @@ class Controller:
                     self.reload_manual_action()
                     self.reload_settings()
                     failures.threshold = self.c['bark']['error_threshold']
-                    self.publish('controller', state='checking')
+                    self.publish('controller', state='checking', release_running=False)
                     self.refresh_battery()
                     self.flush_batch_reports()
                     while not self.events.empty():
@@ -861,8 +871,6 @@ class Controller:
                     self.publish('controller', state='error', error=message, error_type=failure)
                     if isinstance(exc, StorageUnavailable):
                         self.publish('storage', state='error', error=message)
-                    if isinstance(exc, PhoneUnavailable):
-                        self.publish('photos', state='error', message=message)
                     try:
                         if not known:
                             with suppress(Exception):

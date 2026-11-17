@@ -93,9 +93,11 @@ class ManualReleaseTests(unittest.TestCase):
 
     def test_ambiguous_release_is_not_replayed_after_restart(self):
         c = self.controller('manual_release_uncertain')
+        c.phone_call.return_value={'state':'blocked','message':'设备过热'}
         with self.assertRaises(PhoneUnavailable):
             self.tick(c)
-        c.phone_call.assert_not_called()
+        c.phone_call.assert_called_once_with('status')
+        c.publish.assert_any_call('photos', state='blocked', message='设备过热', observed_at=unittest.mock.ANY, read_error=None)
 
     def test_click_failure_leaves_persistent_uncertainty(self):
         c = self.controller('manual_release_requested')
@@ -103,6 +105,20 @@ class ManualReleaseTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             self.tick(c)
         self.assertEqual(c.round['phase'], 'manual_release_uncertain')
+        self.assertEqual(c.publish.call_args.kwargs, {'release_running': False})
+
+    def test_phone_read_error_is_separate_from_release_error(self):
+        c = self.controller()
+        c.phone = Mock()
+        c.phone.status.side_effect = RuntimeError('read failed')
+        c.phone.release_space.side_effect = RuntimeError('release failed')
+        with self.assertRaises(PhoneUnavailable):
+            Controller.phone_call(c, 'status')
+        c.publish.assert_called_once_with('photos', read_error='RuntimeError')
+        c.publish.reset_mock()
+        with self.assertRaises(PhoneUnavailable):
+            Controller.phone_call(c, 'release_space', execute=True)
+        c.publish.assert_not_called()
 
     def test_explicit_retained_file_does_not_block_next_batch_or_change_owner(self):
         c = self.controller()

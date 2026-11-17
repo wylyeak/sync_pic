@@ -68,7 +68,7 @@ function updateBatchActions(run){
  document.querySelectorAll('[data-actions-batch]').forEach(box=>{
   const id=box.dataset.actionsBatch;
   const phase=ctrl.batch_id?(ctrl.batch_id===id?ctrl.phase:'complete'):box.dataset.actionPhase;
-  const signature=JSON.stringify([phase,ctrl.state,run.controller_stale,run.available,state.releasePending?.get(id)?.status]);
+  const signature=JSON.stringify([phase,ctrl.state,ctrl.release_running,run.controller_stale,run.available,state.releasePending?.get(id)?.status]);
   if(box.dataset.actionSignature!==signature){box.innerHTML=actionMarkup(id,phase);box.dataset.actionSignature=signature;}
  });
  document.querySelectorAll('[data-phase-batch]').forEach(box=>{if(box.dataset.phaseBatch===ctrl.batch_id)box.innerHTML=badge(phaseLabels[ctrl.phase]||ctrl.phase,ctrl.phase==='complete'?'green':'blue');});
@@ -104,13 +104,20 @@ function updateSyncProgress(run){
  box.hidden=!['sync','deletions','final_sync','manual_release_sync','manual_delete_sync'].includes(phase)||!id;
  syncProgress();
 }
+function releaseIsRunning(ctrl){
+ return ctrl.release_running??!['waiting','error'].includes(ctrl.state);
+}
+function phoneLink(){
+ const link=document.querySelector('.pixel-shortcut:not(.syncthing-shortcut)');
+ return link&&!link.hidden?`<a class="text-link" href="${esc(link.href)}" target="_blank" rel="noopener noreferrer">查看手机 ↗</a> `:'';
+}
 function actionMarkup(id,phase){
  if(state.latestRuntime?.controller_stale||state.latestRuntime?.available===false)return '<p class="subtle" role="status">控制器状态不可用，暂不能操作。</p>';
  const pending=state.releasePending?.get(id);
  if(pending)return `<button class="primary-button" disabled>${pending.status==='sending'?'正在提交…':pending.status==='unknown'?'请求结果待核对':'已提交 · 等待处理'}</button><p class="subtle" role="status">${pending.status==='sending'?'正在提交释放请求…':pending.status==='unknown'?'请求响应超时或连接中断，正在核对最新状态，请勿重复提交。':'释放请求已接受，当前检查完成后开始处理。'}</p>`;
- if(phase==='manual_release_uncertain'&&state.latestRuntime?.controller?.batch_id===id&&!['waiting','error'].includes(state.latestRuntime.controller.state))return '<p class="subtle" role="status">正在执行相册释放，请等待结果…</p>';
+ if(phase==='manual_release_uncertain'&&state.latestRuntime?.controller?.batch_id===id&&releaseIsRunning(state.latestRuntime.controller))return '<p class="subtle" role="status">正在执行相册释放，请等待结果…</p>';
  if(phase==='manual_review')return `<button class="primary-button" data-review="${esc(id)}">查看残留并标记删除</button><p class="subtle">释放和删除同步已确认，请选择要删除的残留文件；源原片保留。</p>`;
- if(phase==='manual_release_uncertain')return `<button class="primary-button" data-release="${esc(id)}">重新尝试释放</button><p class="subtle">已进入释放阶段，但上次释放结果尚未确认。请先检查手机相册，再决定是否重试。</p>`;
+ if(phase==='manual_release_uncertain')return `${phoneLink()}<button class="primary-button" data-release="${esc(id)}">重新尝试释放</button><p class="subtle">请先查看手机相册，确认当前释放情况后再决定是否重试。</p>`;
  return phase==='backup'?`<button class="primary-button" data-release="${esc(id)}">跳到释放阶段</button><p class="subtle">先释放已备份内容并同步删除，再由你在页面标记残留文件删除。</p>`:'';
 }
 function releaseButton(id,phase){
@@ -169,15 +176,15 @@ function phaseBadge(row){
 function batchTable(items,compact=false){if(!items.length)return empty('新的备份批次将在这里出现');return `<table><thead><tr><th>批次</th><th>开始时间</th><th>文件数</th><th>状态</th><th>手动删除</th><th>同步删除</th>${compact?'':'<th>备份确认</th><th>总耗时</th>'}</tr></thead><tbody>${items.map(r=>`<tr><td>${roundLink(r)}</td><td>${esc(date(r.started_at,true))}</td><td>${num(r.file_count)}</td><td>${phaseBadge(r)}</td><td>${r.manual_deleted==null?'—':num(r.manual_deleted)}</td><td>${r.syncthing_deleted==null?'—':num(r.syncthing_deleted)}</td>${compact?'':`<td>${r.backed_up==null?'未记录':num(r.backed_up)}</td><td>${r.started_at?esc(elapsed((r.ended_at||Date.now()/1000)-r.started_at)):'—'}</td>`}</tr>`).join('')}</tbody></table>`;}
 function renderActiveBatch(row,run){
  const active=effectiveBatch(row,run);
- const signature=JSON.stringify([active,run.controller?.state,run.controller?.error,run.controller_stale,Math.floor(Date.now()/10000)]);
+ const signature=JSON.stringify([active,run.controller?.state,run.controller?.release_running,run.controller?.error,run.controller_stale,Math.floor(Date.now()/10000)]);
  if(state.activeCardSignature===signature){updateSyncProgress(run);updateBatchActions(run);return;}
  state.activeCardSignature=signature;
  if(active){
   const index=phaseOrder.indexOf(active.phase),groups=[['mapping','映射'],['sync','同步'],['backup','备份'],['release','释放'],['observe','观察'],['final_sync','完成']];
   const currentGroup=active.phase.startsWith('manual_')||active.phase==='release_uncertain'||active.phase==='deletions'?3:active.phase==='cleanup'?4:Math.max(0,groups.findIndex(([p])=>p===active.phase));
-  const control=run.controller||{},error=control.state==='error';
-  $('batch-badge').className='badge '+(error?'red':run.controller_stale?'amber':'blue');$('batch-badge').textContent=error?'异常 · 已暂停':run.controller_stale?'等待状态更新':active.phase_label;
-  $('active-batch').innerHTML=`<div class="batch-meta"><span class="batch-id">BATCH #${esc(active.id.slice(0,8).toUpperCase())}</span><small>${esc(date(active.started_at))} 开始</small></div><p class="batch-description">${error?esc(control.error):active.phase==='observe'?`同步与备份稳定确认 ${Number(active.observations||0)} / 3 次，每次至少间隔 5 分钟。`:'本批成员已冻结，新发现的照片将在下一批处理。'}</p><div class="pipeline">${groups.map(([p,label],i)=>`<div class="step ${i<currentGroup?'done':i===currentGroup?'current':''}"><span class="step-dot">${i<currentGroup?'✓':i+1}</span><span class="step-label">${label}</span></div>`).join('')}</div><div class="batch-stats"><div class="batch-stat"><strong>${active.file_count==null?'—':num(active.file_count)}</strong><small>本批文件</small></div><div class="batch-stat"><strong>${active.backed_up==null?'—':num(active.backed_up)}</strong><small>整体备份确认</small></div><div class="batch-stat"><strong>${esc(elapsed(Date.now()/1000-(active.started_at||Date.now()/1000)))}</strong><small>本批已用时</small></div></div>${releaseButton(active.id,active.phase)}<div class="batch-bottom"><span>${active.next_check&&active.phase==='observe'?'下次确认不早于 '+esc(date(active.next_check,true)):'当前阶段：'+esc(active.phase_label)}</span><button class="text-link" data-batch="${esc(active.id)}">批次详情 ↗</button></div>`;
+  const control=run.controller||{},error=control.state==='error',uncertain=active.phase==='manual_release_uncertain'&&!releaseIsRunning(control);
+  $('batch-badge').className='badge '+(error?'red':run.controller_stale?'amber':'blue');$('batch-badge').textContent=uncertain?'释放结果待确认':error?'异常 · 已暂停':run.controller_stale?'等待状态更新':active.phase_label;
+  $('active-batch').innerHTML=`<div class="batch-meta"><span class="batch-id">BATCH #${esc(active.id.slice(0,8).toUpperCase())}</span><small>${esc(date(active.started_at))} 开始</small></div><p class="batch-description">${uncertain?'上次释放操作未能确认完成，可能已有部分内容释放。流程已暂停，请先查看手机相册。':error?esc(control.error):active.phase==='observe'?`同步与备份稳定确认 ${Number(active.observations||0)} / 3 次，每次至少间隔 5 分钟。`:'本批成员已冻结，新发现的照片将在下一批处理。'}</p><div class="pipeline">${groups.map(([p,label],i)=>`<div class="step ${i<currentGroup?'done':i===currentGroup?'current':''}"><span class="step-dot">${i<currentGroup?'✓':i+1}</span><span class="step-label">${label}</span></div>`).join('')}</div><div class="batch-stats"><div class="batch-stat"><strong>${active.file_count==null?'—':num(active.file_count)}</strong><small>本批文件</small></div><div class="batch-stat"><strong>${active.backed_up==null?'—':num(active.backed_up)}</strong><small>整体备份确认</small></div><div class="batch-stat"><strong>${esc(elapsed(Date.now()/1000-(active.started_at||Date.now()/1000)))}</strong><small>本批已用时</small></div></div>${releaseButton(active.id,active.phase)}<div class="batch-bottom"><span>${active.next_check&&active.phase==='observe'?'下次确认不早于 '+esc(date(active.next_check,true)):'当前阶段：'+esc(active.phase_label)}</span><button class="text-link" data-batch="${esc(active.id)}">批次详情 ↗</button></div>`;
  }else{$('batch-badge').className='badge green';$('batch-badge').textContent='当前无活动批次';$('active-batch').innerHTML=empty('正在等待下一批照片 · 源扫描独立运行');}
  updateSyncProgress(run);updateBatchActions(run);
 }
@@ -229,6 +236,18 @@ function batteryRow(battery){
  const desc=valid?'跟随控制器采集手机电量':battery.state==='error'?'读取失败，保留上次电量':known?'数据未更新，保留上次电量':'等待手机电量数据';
  return ['▯','手机 电量',desc,label,valid?(battery.level<=20?'amber':battery.charging||battery.status==='full'?'green':'blue'):'neutral',battery.measured_at];
 }
+function photosRow(photos,ctrl){
+ const stamp=photos.observed_at||photos.checked_at;
+ const legacyError=photos.state==='error'&&/手动释放结果待确认|相册释放结果不明确/.test(photos.message||'');
+ const observed=!legacyError&&Boolean(photos.state);
+ const detail=observed?((Array.isArray(photos.details)?photos.details.filter(s=>!['备份','Backup'].includes(s)).join(' · '):'')||photos.message||''):'';
+ const unreadable=Boolean(photos.read_error)||legacyError;
+ const stale=Boolean(stamp)&&Date.now()/1000-stamp>600;
+ const desc=unreadable?['暂时无法读取相册状态',detail?'上次读取：'+detail:'等待下一次读取']: [detail||'等待读取手机相册状态',stale?'上次读取结果，数据未更新':'',ctrl.phase==='sync'?'本批仍在同步，以上为手机当前内容的备份状态':''].filter(Boolean);
+ const label=unreadable?'读取失败':stale?'数据未更新':{complete:'备份完成',syncing:'备份中',blocked:'已暂停',error:'相册异常',unknown:'状态未知'}[photos.state]||'未检查';
+ const color=unreadable||stale?'amber':photos.state==='complete'?'green':['error','blocked'].includes(photos.state)?'red':photos.state==='syncing'?'blue':'neutral';
+ return ['◉','Google 相册',desc,label,color,observed?stamp:null];
+}
 function liveSections(run){
  run=rememberRuntime(run);
  const sync=run.syncthing||{},photos=run.photos||{},storage=run.storage||{},ctrl=run.controller||{};
@@ -237,7 +256,7 @@ function liveSections(run){
   ['⇄','NAS 端 Syncthing',sync.need_local==null?'本机状态待检查':`本机待同步 ${num(sync.need_local)} 项${sync.need_local_bytes!=null?' · '+bytes(sync.need_local_bytes):''}`,sync.error?'服务异常':sync.local_state==='scanning'?'扫描中':sync.local_state==='syncing'?'同步中':sync.local_state==='idle'&&sync.need_local===0?'本机就绪':sync.local_state?'等待同步':'未检查',sync.error?'red':sync.local_state==='idle'&&sync.need_local===0?'green':sync.local_state?'blue':'neutral',sync.checked_at],
   pixelStatus(sync),
   batteryRow(run.battery||{}),
-  ['◉','Google 相册',[(photos.state!=='error'&&Array.isArray(photos.details)?photos.details.filter(s=>!['备份','Backup'].includes(s)).join(' · '):'')||photos.message||'由手机相册整体状态确认',ctrl.phase==='sync'?'本批仍在同步，以上为手机当前内容的备份状态':''].filter(Boolean),{complete:'备份完成',syncing:'备份中',blocked:'已暂停',error:'手机异常',unknown:'状态未知'}[photos.state]||'未检查',photos.state==='complete'?'green':['error','blocked'].includes(photos.state)?'red':photos.state==='syncing'?'blue':'neutral',photos.checked_at],
+  photosRow(photos,ctrl),
   ['◷','备份控制器','状态检查 '+ago(ctrl.checked_at),run.controller_stale?'状态未更新':ctrl.state==='error'?'遇到异常':ctrl.state==='stopped'?'已停止':ctrl.state?'运行中':'未连接',run.controller_stale?'amber':ctrl.state==='error'?'red':ctrl.state==='stopped'?'neutral':ctrl.state?'green':'neutral',ctrl.checked_at]
  ];
  $('health').innerHTML=health.map(([icon,name,desc,label,color,stamp])=>`<div class="health-row"><span class="health-icon">${icon}</span><div class="health-name">${name}<small title="${esc(date(stamp))}">${(Array.isArray(desc)?desc:[desc]).map(line=>esc(line)).join('<br>')}${stamp?' · '+esc(ago(stamp)):''}</small></div>${badge(label,color)}</div>`).join('');
